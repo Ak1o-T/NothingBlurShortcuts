@@ -692,36 +692,81 @@ public class XposedInit implements IXposedHookLoadPackage {
                     int uiMode = ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
                     boolean isDark = (uiMode == Configuration.UI_MODE_NIGHT_YES);
 
-                    int left = 0;
-                    int top = 0;
-                    try { top = (Integer) XposedHelpers.getObjectField(bgView, "mBackgroundTop"); } catch (Throwable ignored) {}
-                    int right = 0;
-                    try { right = (Integer) XposedHelpers.getObjectField(bgView, "mActualWidth"); } catch (Throwable ignored) {}
-                    int bottom = 0;
-                    try { bottom = (Integer) XposedHelpers.getObjectField(bgView, "mActualHeight"); } catch (Throwable ignored) {}
+                    int bgTop = 0;
+                    try { bgTop = (Integer) XposedHelpers.getObjectField(bgView, "mBackgroundTop"); } catch (Throwable ignored) {}
+                    int actualWidth = 0;
+                    try { actualWidth = (Integer) XposedHelpers.getObjectField(bgView, "mActualWidth"); } catch (Throwable ignored) {}
+                    int actualHeight = 0;
+                    try { actualHeight = (Integer) XposedHelpers.getObjectField(bgView, "mActualHeight"); } catch (Throwable ignored) {}
 
-                    if (isShelf && parent != null) {
-                        if (right <= 0 || right > parent.getWidth()) right = parent.getWidth();
-                        if (bottom <= 0) bottom = parent.getHeight();
-                    } else {
-                        if (right <= 0) right = bgView.getWidth();
-                        if (bottom <= 0) bottom = bgView.getHeight();
+                    if (actualWidth <= 0) {
+                        actualWidth = bgView.getWidth();
                     }
-
-                    if (right <= left || bottom <= top) return;
+                    if (actualHeight <= 0) {
+                        if (parent != null) {
+                            try { actualHeight = (Integer) XposedHelpers.callMethod(parent, "getActualHeight"); } catch (Throwable ignored) {}
+                        }
+                        if (actualHeight <= 0) actualHeight = bgView.getHeight();
+                    }
 
                     int clipTop = 0;
                     try { clipTop = (Integer) XposedHelpers.getObjectField(bgView, "mClipTopAmount"); } catch (Throwable ignored) {}
                     int clipBottom = 0;
                     try { clipBottom = (Integer) XposedHelpers.getObjectField(bgView, "mClipBottomAmount"); } catch (Throwable ignored) {}
 
-                    float[] radii = null;
-                    try { radii = (float[]) XposedHelpers.getObjectField(bgView, "mCornerRadii"); } catch (Throwable ignored) {}
+                    int drawLeft = 0;
+                    int drawRight = actualWidth;
+                    int drawTop = Math.max(bgTop, clipTop);
+                    int drawBottom = clipBottom > 0 ? (actualHeight - clipBottom) : actualHeight;
+
+                    if (drawRight <= drawLeft || drawBottom <= drawTop) {
+                        return;
+                    }
+
+                    // System corner radius detection via Roundable interface:
+                    // In Nothing OS 5.0 (Android 15), ExpandableNotificationRow and NotificationBackgroundView
+                    // implement Roundable, with maxRadius = 51px (~18dp).
+                    float densityF = ctx.getResources().getDisplayMetrics().density;
+                    float defaultRadius = 18.0f * densityF;
+                    float topRadius = defaultRadius;
+                    float bottomRadius = defaultRadius;
+
+                    if (isShelf) {
+                        topRadius = (drawBottom - drawTop) / 2.0f;
+                        bottomRadius = topRadius;
+                    } else if (parent != null) {
+                        try {
+                            Float tr = (Float) XposedHelpers.callMethod(parent, "getTopCornerRadius");
+                            Float br = (Float) XposedHelpers.callMethod(parent, "getBottomCornerRadius");
+                            if (tr != null && br != null && (tr > 0f || br > 0f)) {
+                                topRadius = tr;
+                                bottomRadius = br;
+                            }
+                        } catch (Throwable t) {
+                            try {
+                                Float tr = (Float) XposedHelpers.callMethod(bgView, "getTopCornerRadius");
+                                Float br = (Float) XposedHelpers.callMethod(bgView, "getBottomCornerRadius");
+                                if (tr != null && br != null && (tr > 0f || br > 0f)) {
+                                    topRadius = tr;
+                                    bottomRadius = br;
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+                    }
+
+                    RectF rectF = new RectF(drawLeft, drawTop, drawRight, drawBottom);
+                    float[] cornerRadii = new float[] {
+                        topRadius, topRadius,
+                        topRadius, topRadius,
+                        bottomRadius, bottomRadius,
+                        bottomRadius, bottomRadius
+                    };
+
+                    Path path = new Path();
+                    path.addRoundRect(rectF, cornerRadii, Path.Direction.CW);
 
                     canvas.save();
-                    if (clipTop > 0 || clipBottom > 0) {
-                        canvas.clipRect(0, clipTop, right, bottom - clipBottom);
-                    }
+                    canvas.clipPath(path);
 
                     // 1. Hardware cross-window GPU blur
                     Object blurDrawable = null;
@@ -735,7 +780,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                             if (vri != null) {
                                 blurDrawable = XposedHelpers.callMethod(vri, "createBackgroundBlurDrawable");
                                 XposedHelpers.setObjectField(bgView, "mBackgroundBlurDrawable", blurDrawable);
-                                XposedHelpers.callMethod(blurDrawable, "setBlurRadius", 160);
                             }
                         } catch (Throwable ignored) {}
                     }
@@ -744,30 +788,19 @@ public class XposedInit implements IXposedHookLoadPackage {
                         try {
                             XposedHelpers.callMethod(blurDrawable, "setBlurRadius", 160);
                         } catch (Throwable ignored) {}
-                        Drawable bd = (Drawable) blurDrawable;
-                        bd.setBounds(left, top, right, bottom);
-                        if (radii != null && radii.length >= 8) {
+                        try {
+                            XposedHelpers.callMethod(blurDrawable, "setCornerRadius", topRadius, topRadius, bottomRadius, bottomRadius);
+                        } catch (Throwable t) {
                             try {
-                                XposedHelpers.callMethod(blurDrawable, "setCornerRadius", radii[0]);
-                            } catch (Throwable ignored) {}
-                        } else {
-                            try {
-                                XposedHelpers.callMethod(blurDrawable, "setCornerRadius", (bottom - top) / 2.0f);
+                                XposedHelpers.callMethod(blurDrawable, "setCornerRadius", Math.max(topRadius, bottomRadius));
                             } catch (Throwable ignored) {}
                         }
+                        Drawable bd = (Drawable) blurDrawable;
+                        bd.setBounds(drawLeft, drawTop, drawRight, drawBottom);
                         bd.draw(canvas);
                     }
 
                     // 2. Frosted Glass Tint & Specular Rim
-                    RectF rectF = new RectF(left, top, right, bottom);
-                    Path path = new Path();
-                    if (radii != null && radii.length >= 8) {
-                        path.addRoundRect(rectF, radii, Path.Direction.CW);
-                    } else {
-                        float r = isShelf ? ((bottom - top) / 2.0f) : (24.0f * ctx.getResources().getDisplayMetrics().density);
-                        path.addRoundRect(rectF, r, r, Path.Direction.CW);
-                    }
-
                     if (isDark) {
                         // Dark theme: translucent smoked glass tint + specular edge rim
                         glassTintPaint.setColor(0x44000000);
@@ -789,13 +822,13 @@ public class XposedInit implements IXposedHookLoadPackage {
                             for (int i = 0; i < ld.getNumberOfLayers(); i++) {
                                 Drawable layer = ld.getDrawable(i);
                                 if (layer instanceof android.graphics.drawable.RippleDrawable) {
-                                    layer.setBounds(left, top, right, bottom);
+                                    layer.setBounds(drawLeft, drawTop, drawRight, drawBottom);
                                     layer.draw(canvas);
                                 }
                             }
                         } else if (bgObj instanceof android.graphics.drawable.RippleDrawable) {
                             Drawable rd = (Drawable) bgObj;
-                            rd.setBounds(left, top, right, bottom);
+                            rd.setBounds(drawLeft, drawTop, drawRight, drawBottom);
                             rd.draw(canvas);
                         }
                     } catch (Throwable ignored) {}
