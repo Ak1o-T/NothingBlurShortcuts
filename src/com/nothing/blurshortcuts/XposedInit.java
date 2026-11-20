@@ -48,6 +48,8 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static volatile int lastUiMode = -1;
 
     // Status Bar & Shade State tracking
+    private static volatile Context sAppContext = null;
+    private static volatile View sNsslView = null;
     private static volatile Object sStatusBarStateController = null;
     private static volatile Object sAmbientState = null;
     private static volatile int sStatusBarState = 1; // 1 = KEYGUARD, 0 = SHADE, 2 = SHADE_LOCKED
@@ -94,6 +96,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                     Application app = (Application) param.thisObject;
                     if (app != null && "com.android.systemui".equals(app.getPackageName())) {
+                        sAppContext = app;
                         Log.e(TAG, "Application.onCreate called! Initializing with app ClassLoader.");
                         initSystemUI(app.getClassLoader());
                     }
@@ -141,8 +144,17 @@ public class XposedInit implements IXposedHookLoadPackage {
         // 2. Discover FrostedBackdropDrawable and FrostedBackdropProvider
         try {
             providerClass = cl.loadClass("com.nothing.cardhost.frosted.FrostedBackdropProvider");
-            Object companion = XposedHelpers.getStaticObjectField(providerClass, "Companion");
-            backdropProvider = XposedHelpers.callMethod(companion, "getInstance");
+            XposedBridge.hookAllConstructors(providerClass, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    backdropProvider = param.thisObject;
+                    Log.e(TAG, "Captured FrostedBackdropProvider via constructor: " + backdropProvider);
+                }
+            });
+            try {
+                Object companion = XposedHelpers.getStaticObjectField(providerClass, "Companion");
+                backdropProvider = XposedHelpers.callMethod(companion, "getInstance");
+            } catch (Throwable ignored) {}
             Log.e(TAG, "FrostedBackdropProvider instance: " + backdropProvider);
 
             drawableClass = cl.loadClass("com.nothing.commBase.frosted.stdview.FrostedBackdropDrawable");
@@ -257,13 +269,16 @@ public class XposedInit implements IXposedHookLoadPackage {
                                     }
 
                                     // Context & UI Theme Mode (Light vs Dark) detection
-                                    Context ctx = null;
-                                    try {
-                                        ctx = (Context) XposedHelpers.callStaticMethod(
-                                            XposedHelpers.findClass("android.app.ActivityThread", null),
-                                            "currentApplication"
-                                        );
-                                    } catch (Throwable ignored) {}
+                                    Context ctx = sAppContext;
+                                    if (ctx == null) {
+                                        try {
+                                            ctx = (Context) XposedHelpers.callStaticMethod(
+                                                XposedHelpers.findClass("android.app.ActivityThread", null),
+                                                "currentApplication"
+                                            );
+                                            if (ctx != null) sAppContext = ctx;
+                                        } catch (Throwable ignored) {}
+                                    }
 
                                     int currentUiMode = Configuration.UI_MODE_NIGHT_NO;
                                     if (ctx != null) {
@@ -539,7 +554,11 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         sStatusBarStateController = param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Boolean) {
+                            boolean wasDozing = sIsDozing;
                             sIsDozing = (Boolean) param.args[0];
+                            if (wasDozing && !sIsDozing && sNsslView != null) {
+                                sNsslView.postInvalidate();
+                            }
                         }
                         try {
                             sDozeAmount = (Float) XposedHelpers.getObjectField(param.thisObject, "mDozeAmount");
@@ -558,6 +577,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                         try {
                             sIsDozing = (Boolean) XposedHelpers.getObjectField(param.thisObject, "mIsDozing");
                         } catch (Throwable ignored) {}
+                        if (sNsslView != null) {
+                            sNsslView.postInvalidate();
+                        }
                     }
                 });
                 XC_MethodHook dozeAmountHook = new XC_MethodHook() {
@@ -632,9 +654,16 @@ public class XposedInit implements IXposedHookLoadPackage {
             // Track state via NotificationStackScrollLayout
             try {
                 Class<?> nsslCls = cl.loadClass("com.android.systemui.statusbar.notification.stack.NotificationStackScrollLayout");
+                XposedBridge.hookAllConstructors(nsslCls, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sNsslView = (View) param.thisObject;
+                    }
+                });
                 XposedBridge.hookAllMethods(nsslCls, "setStatusBarState", new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sNsslView = (View) param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Integer) {
                             sStatusBarState = (Integer) param.args[0];
                         }
@@ -643,6 +672,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                 XposedBridge.hookAllMethods(nsslCls, "setLStoShadeProgress", new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sNsslView = (View) param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
                             sLsToShadeProgress = (Float) param.args[0];
                         }
@@ -651,6 +681,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                 XposedBridge.hookAllMethods(nsslCls, "setFractionToShade", new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sNsslView = (View) param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
                             sFractionToShade = (Float) param.args[0];
                         }
@@ -712,6 +743,12 @@ public class XposedInit implements IXposedHookLoadPackage {
                             v = (vp instanceof View) ? (View) vp : null;
                         }
                     }
+                    if (sNsslView == null && parent != null) {
+                        ViewParent vp = parent.getParent();
+                        if (vp instanceof View) {
+                            sNsslView = (View) vp;
+                        }
+                    }
 
                     // 2. Read live status bar, shade & doze state directly from controller
                     if (sStatusBarStateController != null) {
@@ -738,9 +775,12 @@ public class XposedInit implements IXposedHookLoadPackage {
                         } catch (Throwable ignored) {}
                     }
 
-                    // 3. Instant AOD check (seamless fade to black)
-                    if (sIsDozing || sDozeAmount > 0.005f) {
-                        cleanupBlur(bgView);
+                    // 3. AOD / Sleep check:
+                    // If device is dozing or screen is off: cancel onDraw so standard solid card is NOT drawn!
+                    // Background stays completely clean and transparent on AOD without showing any white cards.
+                    // DO NOT call cleanupBlur here so mBackgroundBlurDrawable stays attached and ready for instant wake-up.
+                    if (sIsDozing || sDozeAmount >= 0.99f) {
+                        param.setResult(null);
                         return;
                     }
 
@@ -799,7 +839,9 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     boolean isTarget = (isLockscreenTarget || isHeadsUpTarget) && !isColorized;
                     if (!isTarget) {
-                        cleanupBlur(bgView);
+                        if (state != 1 || isShadeOrMenu || isUserExpanded) {
+                            cleanupBlur(bgView);
+                        }
                         return;
                     }
 
