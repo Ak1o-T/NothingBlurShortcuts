@@ -843,6 +843,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                 XposedBridge.hookAllMethods(sscCls, "setState", new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sStatusBarStateController = param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Integer) {
                             onStatusBarStateChanged(sStatusBarState, (Integer) param.args[0]);
                         }
@@ -851,6 +852,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                 XposedBridge.hookAllMethods(sscCls, "onStatusBarStateChanged", new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sStatusBarStateController = param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Integer) {
                             onStatusBarStateChanged(sStatusBarState, (Integer) param.args[0]);
                         }
@@ -1005,25 +1007,14 @@ public class XposedInit implements IXposedHookLoadPackage {
                 XposedBridge.hookAllMethods(csCls, "setBarState", new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (sStatusBarStateController == null) {
+                            try { sStatusBarStateController = XposedHelpers.getObjectField(param.thisObject, "mStatusBarStateController"); } catch (Throwable ignored) {}
+                        }
                         if (param.args.length > 0 && param.args[0] instanceof Integer) {
                             onStatusBarStateChanged(sStatusBarState, (Integer) param.args[0]);
                         }
                     }
                 });
-                XposedBridge.hookAllMethods(csCls, "goToLockedShade", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        onStatusBarStateChanged(sStatusBarState, 2);
-                    }
-                });
-                try {
-                    XposedBridge.hookAllMethods(csCls, "goToLockedShadeFromKeyguard", new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            onStatusBarStateChanged(sStatusBarState, 2);
-                        }
-                    });
-                } catch (Throwable ignored) {}
                 try {
                     XposedBridge.hookAllMethods(csCls, "showBouncerOrUnlock", new XC_MethodHook() {
                         @Override
@@ -1039,6 +1030,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                 XposedBridge.hookAllMethods(nsslControllerCls, "setStatusBarState", new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (sStatusBarStateController == null) {
+                            try { sStatusBarStateController = XposedHelpers.getObjectField(param.thisObject, "mStatusBarStateController"); } catch (Throwable ignored) {}
+                        }
                         if (param.args.length > 0 && param.args[0] instanceof Integer) {
                             onStatusBarStateChanged(sStatusBarState, (Integer) param.args[0]);
                         }
@@ -1068,14 +1062,12 @@ public class XposedInit implements IXposedHookLoadPackage {
                         try {
                             View bgNormal = (View) XposedHelpers.getObjectField(row, "mBackgroundNormal");
                             if (bgNormal != null) {
-                                cleanupBlur(bgNormal);
                                 bgNormal.invalidate();
                             }
                         } catch (Throwable ignored) {}
                         try {
                             View bgDimmed = (View) XposedHelpers.getObjectField(row, "mBackgroundDimmed");
                             if (bgDimmed != null) {
-                                cleanupBlur(bgDimmed);
                                 bgDimmed.invalidate();
                             }
                         } catch (Throwable ignored) {}
@@ -1165,7 +1157,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
 
                     // 4. Fast direct method invocation on parent row
-                    boolean onKeyguard = false;
+                    boolean onKeyguard = (sStatusBarState == 1);
                     boolean isPinned = false;
                     boolean isColorized = false;
                     boolean isExpanded = false;
@@ -1173,9 +1165,15 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     if (parent != null && notifRowClass.isAssignableFrom(parent.getClass())) {
                         if (sIsOnKeyguardMethod != null) {
-                            try { onKeyguard = (Boolean) sIsOnKeyguardMethod.invoke(parent); } catch (Throwable ignored) {}
+                            try {
+                                Boolean ok = (Boolean) sIsOnKeyguardMethod.invoke(parent);
+                                if (ok != null) onKeyguard = ok;
+                            } catch (Throwable ignored) {}
                         } else {
-                            try { onKeyguard = (Boolean) XposedHelpers.callMethod(parent, "isOnKeyguard"); } catch (Throwable ignored) {}
+                            try {
+                                Boolean ok = (Boolean) XposedHelpers.callMethod(parent, "isOnKeyguard");
+                                if (ok != null) onKeyguard = ok;
+                            } catch (Throwable ignored) {}
                         }
 
                         if (sIsPinnedMethod != null) {
@@ -1211,45 +1209,32 @@ public class XposedInit implements IXposedHookLoadPackage {
                             try { groupExp = (Boolean) XposedHelpers.callMethod(parent, "isGroupExpanded"); } catch (Throwable ignored) {}
                         }
 
-                        boolean userChanged = false;
-                        if (sHasUserChangedExpansionMethod != null) {
-                            try { userChanged = (Boolean) sHasUserChangedExpansionMethod.invoke(parent); } catch (Throwable ignored) {}
-                        } else {
-                            try { userChanged = (Boolean) XposedHelpers.callMethod(parent, "hasUserChangedExpansion"); } catch (Throwable ignored) {}
-                        }
-
-                        boolean isExp = false;
-                        if (sIsExpandedMethod != null) {
-                            try { isExp = (Boolean) sIsExpandedMethod.invoke(parent); } catch (Throwable ignored) {}
-                        }
-
-                        boolean childrenExp = false;
-                        if (sAreChildrenExpandedMethod != null) {
-                            try { childrenExp = (Boolean) sAreChildrenExpandedMethod.invoke(parent); } catch (Throwable ignored) {}
-                        }
-
-                        boolean isChild = false;
-                        if (sIsChildInGroupMethod != null) {
-                            try { isChild = (Boolean) sIsChildInGroupMethod.invoke(parent); } catch (Throwable ignored) {}
-                        }
-
-                        isExpanded = userExp || showingExp || groupExp || userChanged || isExp || childrenExp || isChild;
+                        isExpanded = userExp || showingExp || groupExp;
 
                     } else if (parent != null && shelfCls != null && shelfCls.isAssignableFrom(parent.getClass())) {
                         isShelf = true;
                         if (sShelfIsOnKeyguardMethod != null) {
-                            try { onKeyguard = (Boolean) sShelfIsOnKeyguardMethod.invoke(parent); } catch (Throwable ignored) {}
+                            try {
+                                Boolean ok = (Boolean) sShelfIsOnKeyguardMethod.invoke(parent);
+                                if (ok != null) onKeyguard = ok;
+                            } catch (Throwable ignored) {}
                         } else {
-                            try { onKeyguard = (Boolean) XposedHelpers.callMethod(parent, "isOnKeyguard"); } catch (Throwable ignored) {}
+                            try {
+                                Boolean ok = (Boolean) XposedHelpers.callMethod(parent, "isOnKeyguard");
+                                if (ok != null) onKeyguard = ok;
+                            } catch (Throwable ignored) {}
                         }
                     }
 
                     // 5. Shade state & progress verification:
+                    // If on resting Lockscreen (state == 1 and shade closed): guaranteed onKeyguard!
                     // If in Shade (pulled down or on desktop): forced off keyguard
                     int state = sStatusBarState;
                     float lsToShade = sLsToShadeProgress;
                     float fractionToShade = sFractionToShade;
-                    if (state == 2 || state == 0 || lsToShade > 0.001f || fractionToShade > 0.001f) {
+                    if (state == 1 && lsToShade <= 0.001f && fractionToShade <= 0.001f) {
+                        onKeyguard = true;
+                    } else if (state == 2 || state == 0 || lsToShade > 0.001f || fractionToShade > 0.001f) {
                         onKeyguard = false;
                     }
 
@@ -1258,7 +1243,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     // - On resting lockscreen (or Heads-Up pinned alert over apps)
                     // - AND NOT in Notification Shade
                     // - AND NOT on Bouncer (PIN/password screen)
-                    // - AND NOT expanded (user expanded / showing expanded / group expanded / child in group)
+                    // - AND NOT expanded (user expanded / showing expanded / group expanded)
                     // - AND NOT colorized (media player with album art)
                     boolean isTarget = (onKeyguard || isPinned) && !isExpanded && !isColorized && !sBouncerShowing;
 
@@ -1582,6 +1567,7 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     private static void onStatusBarStateChanged(int oldState, int newState) {
         sStatusBarState = newState;
+        Log.i(TAG, "onStatusBarStateChanged: " + oldState + " -> " + newState);
         if (newState == 0 || newState == 2) {
             clearAllNotificationBlurs();
         } else if (newState == 1 && sScreenAwake && !sBouncerShowing) {
