@@ -1395,9 +1395,12 @@ public class XposedInit implements IXposedHookLoadPackage {
                     boolean isPinned = false;
                     boolean isColorized = false;
                     String bgCls = bgView.getClass().getName();
-                    boolean isShelf = bgCls.contains("Shelf") || (parent != null && parent.getClass().getName().contains("Shelf"));
+                    // Detect shelf by class name of bgView OR parent — check parent class name first (most reliable)
+                    boolean isShelf = bgCls.contains("Shelf")
+                            || (parent != null && parent.getClass().getName().contains("Shelf"))
+                            || (shelfCls != null && parent != null && shelfCls.isAssignableFrom(parent.getClass()));
 
-                    if (parent != null && notifRowClass.isAssignableFrom(parent.getClass())) {
+                    if (!isShelf && parent != null && notifRowClass.isAssignableFrom(parent.getClass())) {
                         if (sIsPinnedMethod != null) {
                             try { isPinned = (Boolean) sIsPinnedMethod.invoke(parent); } catch (Throwable ignored) {}
                         } else {
@@ -1409,8 +1412,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                         } else {
                             try { isColorized = (Boolean) XposedHelpers.callMethod(parent, "isColorized"); } catch (Throwable ignored) {}
                         }
-                    } else if (parent != null && shelfCls != null && shelfCls.isAssignableFrom(parent.getClass())) {
-                        isShelf = true;
                     }
 
                     if (isShelf) {
@@ -1602,8 +1603,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
 
                         int frostedColor = getFrostedBackdropColor(ctx, isDark);
-                        if (isShelf && isDark) {
-                            frostedColor = 0x38000000;
+                        if (isShelf) {
+                            // Shelf uses a lighter tint so the frosted blur is clearly visible in both themes
+                            frostedColor = isDark ? 0x38000000 : 0x44FFFFFF;
                         }
                         glassTintPaint.setColor(frostedColor);
 
@@ -1620,27 +1622,23 @@ public class XposedInit implements IXposedHookLoadPackage {
                         // Stock System Notification Background Mode (Shade menu, expanded rows, groups)
                         cleanupBlur(bgView);
 
-                        int defaultBgColor = 0;
+                        // Always use a uniform theme-based background color to avoid split-tone artifacts
+                        // when notifications are expanded in the shade. Ignore tint to prevent mismatches
+                        // between the collapsed and expanded portions of a notification row.
+                        int defaultBgColor = isDark ? 0xFF1E1E1E : 0xFFF5F5F5;
                         if (parent != null) {
+                            int normalColor = 0;
                             if (sGetNormalColorMethod != null) {
-                                try { defaultBgColor = (Integer) sGetNormalColorMethod.invoke(parent); } catch (Throwable ignored) {}
+                                try { normalColor = (Integer) sGetNormalColorMethod.invoke(parent); } catch (Throwable ignored) {}
                             } else {
-                                try { defaultBgColor = (Integer) XposedHelpers.callMethod(parent, "getNormalColor"); } catch (Throwable ignored) {}
+                                try { normalColor = (Integer) XposedHelpers.callMethod(parent, "getNormalColor"); } catch (Throwable ignored) {}
+                            }
+                            // Only use normalColor if it's fully opaque (avoids semi-transparent or zero colors)
+                            if (normalColor != 0 && (normalColor & 0xFF000000) == 0xFF000000) {
+                                defaultBgColor = normalColor;
                             }
                         }
-                        if (defaultBgColor == 0 || (defaultBgColor & 0xFF000000) == 0) {
-                            defaultBgColor = isDark ? 0xFF202020 : 0xFFFCFCFC;
-                        }
-
-                        int tint = 0;
-                        if (sTintColorField != null) {
-                            try { tint = sTintColorField.getInt(bgView); } catch (Throwable ignored) {}
-                        } else {
-                            try { tint = (Integer) XposedHelpers.getObjectField(bgView, "mTintColor"); } catch (Throwable ignored) {}
-                        }
-
-                        int solidColor = (tint != 0 && (tint & 0xFF000000) != 0) ? tint : defaultBgColor;
-                        solidBgPaint.setColor(solidColor);
+                        solidBgPaint.setColor(defaultBgColor);
                         canvas.drawPath(sClipPath, solidBgPaint);
                     }
 
