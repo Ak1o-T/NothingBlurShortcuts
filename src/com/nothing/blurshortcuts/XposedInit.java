@@ -56,6 +56,8 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static volatile float sLsToShadeProgress = 0.0f;
     private static volatile float sFractionToShade = 0.0f;
     private static volatile boolean sIsDozing = false;
+    private static volatile boolean sGoingToSleep = false;
+    private static volatile boolean sWakingUp = false;
     private static volatile float sDozeAmount = 0.0f;
     private static volatile boolean sInitialized = false;
 
@@ -518,6 +520,8 @@ public class XposedInit implements IXposedHookLoadPackage {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         sIsDozing = true;
+                        sGoingToSleep = true;
+                        sWakingUp = false;
                         sDozeAmount = 1.0f;
                         invalidateNotificationStack();
                     }
@@ -526,6 +530,8 @@ public class XposedInit implements IXposedHookLoadPackage {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         sIsDozing = false;
+                        sGoingToSleep = false;
+                        sWakingUp = true;
                         sDozeAmount = 0.0f;
                         invalidateNotificationStack();
                     }
@@ -570,6 +576,12 @@ public class XposedInit implements IXposedHookLoadPackage {
                         if (param.args.length > 0 && param.args[0] instanceof Boolean) {
                             boolean wasDozing = sIsDozing;
                             sIsDozing = (Boolean) param.args[0];
+                            if (sIsDozing) {
+                                sGoingToSleep = true;
+                                sWakingUp = false;
+                            } else {
+                                sGoingToSleep = false;
+                            }
                             if (wasDozing != sIsDozing) {
                                 invalidateNotificationStack();
                             }
@@ -591,6 +603,8 @@ public class XposedInit implements IXposedHookLoadPackage {
                         try {
                             sIsDozing = (Boolean) XposedHelpers.getObjectField(param.thisObject, "mIsDozing");
                         } catch (Throwable ignored) {}
+                        sGoingToSleep = false;
+                        sWakingUp = false;
                         invalidateNotificationStack();
                     }
                 });
@@ -599,7 +613,14 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         sStatusBarStateController = param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
-                            sDozeAmount = (Float) param.args[0];
+                            float amt = (Float) param.args[0];
+                            sDozeAmount = amt;
+                            if (amt > 0.01f && !sWakingUp) {
+                                sGoingToSleep = true;
+                            } else if (amt <= 0.01f) {
+                                sGoingToSleep = false;
+                                sWakingUp = false;
+                            }
                         }
                     }
                 };
@@ -781,10 +802,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
 
                     // 3. AOD / Sleep check:
-                    // If device is dozing or screen is off: cancel onDraw so standard solid card is NOT drawn!
-                    // Tell SurfaceFlinger to disable blur immediately via cleanupBlur(bgView).
-                    // Background stays completely clean and transparent on AOD without showing any white cards or lingering blur.
-                    if (sIsDozing) {
+                    // If device is dozing or starting to go to sleep:
+                    // Immediately disable blur in SurfaceFlinger via cleanupBlur(bgView) and cancel onDraw!
+                    // This makes notification blur disappear instantly alongside the bottom shortcuts when transition starts!
+                    if (sIsDozing || sGoingToSleep || (!sWakingUp && sDozeAmount > 0.01f)) {
                         cleanupBlur(bgView);
                         param.setResult(null);
                         return;
