@@ -1,20 +1,16 @@
 package com.nothing.blurshortcuts;
 
+import android.app.Application;
 import android.content.Context;
-import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.ColorFilter;
 import android.graphics.Paint;
-import android.graphics.PixelFormat;
-import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.RippleDrawable;
-import android.os.SystemClock;
 import android.util.Log;
 import android.view.View;
+import android.widget.ImageView;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -46,6 +42,8 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     private static final Set<View> shortcutButtons = Collections.newSetFromMap(new WeakHashMap<>());
     private static final Map<View, FrostedShortcutBackdrop> backdropMap = new WeakHashMap<>();
+    private static final Set<Class<?>> hookedClasses = Collections.newSetFromMap(new WeakHashMap<>());
+    private static boolean systemUiInitialized = false;
 
     private static final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint glassTintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -63,37 +61,62 @@ public class XposedInit implements IXposedHookLoadPackage {
             return;
         }
 
-        Log.i(TAG, "NothingBlurShortcuts initialized in com.android.systemui");
+        Log.i(TAG, "NothingBlurShortcuts handleLoadPackage in com.android.systemui");
+
+        // Hook Application.onCreate so all SystemUI APK dex files and classes are fully loaded
+        try {
+            XposedBridge.hookAllMethods(Application.class, "onCreate", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    if (systemUiInitialized) return;
+                    Application app = (Application) param.thisObject;
+                    if (app != null && "com.android.systemui".equals(app.getPackageName())) {
+                        systemUiInitialized = true;
+                        initSystemUI(app.getClassLoader());
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            Log.e(TAG, "Failed to hook Application.onCreate: " + t.getMessage());
+        }
+
+        // Also attempt direct init with initial classloader
+        initSystemUI(lpparam.classLoader);
+    }
+
+    private static synchronized void initSystemUI(ClassLoader cl) {
+        if (cl == null) return;
 
         // 1. Resolve Nothing OS Frosted Backdrop classes
-        try {
-            providerClass = XposedHelpers.findClass("com.nothing.cardhost.frosted.FrostedBackdropProvider", lpparam.classLoader);
-        } catch (Throwable t) {
-            Log.w(TAG, "FrostedBackdropProvider not found in primary path, trying secondary...");
+        if (providerClass == null) {
             try {
-                providerClass = XposedHelpers.findClass("com.nothing.systemui.widget.NTKeyguardFrostedBackdrop", lpparam.classLoader);
-            } catch (Throwable t2) {
-                Log.e(TAG, "Could not resolve frosted backdrop provider: " + t2.getMessage());
+                providerClass = XposedHelpers.findClass("com.nothing.cardhost.frosted.FrostedBackdropProvider", cl);
+            } catch (Throwable t) {
+                try {
+                    providerClass = XposedHelpers.findClass("com.nothing.systemui.widget.NTKeyguardFrostedBackdrop", cl);
+                } catch (Throwable ignored) {}
             }
         }
 
-        try {
-            drawableClass = XposedHelpers.findClass("com.nothing.commBase.frosted.stdview.FrostedBackdropDrawable", lpparam.classLoader);
-            setClipRadiusMethod = drawableClass.getMethod("setClipRadius", float.class);
-            updateOffsetMethod = drawableClass.getMethod("updateOffset", float.class, float.class);
-            completeTransitionNowMethod = drawableClass.getMethod("completeTransitionNow");
-            onThemeChangedMethod = drawableClass.getMethod("onThemeChanged", int.class);
+        if (drawableClass == null) {
             try {
-                setAnimateEntranceMethod = drawableClass.getMethod("setAnimateEntrance", boolean.class);
-            } catch (Throwable ignored) {}
-            Log.i(TAG, "Successfully resolved FrostedBackdropDrawable methods!");
-        } catch (Throwable t) {
-            Log.e(TAG, "Could not hook FrostedBackdropDrawable: " + t.getMessage());
+                drawableClass = XposedHelpers.findClass("com.nothing.commBase.frosted.stdview.FrostedBackdropDrawable", cl);
+                setClipRadiusMethod = drawableClass.getMethod("setClipRadius", float.class);
+                updateOffsetMethod = drawableClass.getMethod("updateOffset", float.class, float.class);
+                completeTransitionNowMethod = drawableClass.getMethod("completeTransitionNow");
+                onThemeChangedMethod = drawableClass.getMethod("onThemeChanged");
+                try {
+                    setAnimateEntranceMethod = drawableClass.getMethod("setAnimateEntrance", boolean.class);
+                } catch (Throwable ignored) {}
+                Log.i(TAG, "Successfully resolved FrostedBackdropDrawable methods!");
+            } catch (Throwable t) {
+                Log.w(TAG, "FrostedBackdropDrawable lookup pending: " + t.getMessage());
+            }
         }
 
-        // 2. Hook KeyguardBottomAreaView to locate and style affordance buttons
+        // 2. Hook KeyguardBottomAreaView
         try {
-            Class<?> bottomAreaClass = XposedHelpers.findClass("com.android.systemui.statusbar.phone.KeyguardBottomAreaView", lpparam.classLoader);
+            Class<?> bottomAreaClass = XposedHelpers.findClass("com.android.systemui.statusbar.phone.KeyguardBottomAreaView", cl);
 
             XposedBridge.hookAllMethods(bottomAreaClass, "onFinishInflate", new XC_MethodHook() {
                 @Override
@@ -115,14 +138,14 @@ public class XposedInit implements IXposedHookLoadPackage {
                     setupShortcuts((View) param.thisObject);
                 }
             });
-            Log.i(TAG, "Successfully hooked KeyguardBottomAreaView lifecycle!");
+            Log.i(TAG, "Successfully hooked KeyguardBottomAreaView!");
         } catch (Throwable t) {
-            Log.e(TAG, "Failed to hook KeyguardBottomAreaView: " + t.getMessage(), t);
+            Log.w(TAG, "KeyguardBottomAreaView lookup pending: " + t.getMessage());
         }
 
-        // 3. Hook KeyguardQuickAffordanceViewBinder for reactive binding updates
+        // 3. Hook KeyguardQuickAffordanceViewBinder
         try {
-            Class<?> binderClass = XposedHelpers.findClass("com.android.systemui.keyguard.ui.binder.KeyguardQuickAffordanceViewBinder", lpparam.classLoader);
+            Class<?> binderClass = XposedHelpers.findClass("com.android.systemui.keyguard.ui.binder.KeyguardQuickAffordanceViewBinder", cl);
             XposedBridge.hookAllMethods(binderClass, "bind", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
@@ -133,32 +156,27 @@ public class XposedInit implements IXposedHookLoadPackage {
             });
             Log.i(TAG, "Successfully hooked KeyguardQuickAffordanceViewBinder!");
         } catch (Throwable t) {
-            Log.w(TAG, "KeyguardQuickAffordanceViewBinder hook optional warning: " + t.getMessage());
+            Log.w(TAG, "KeyguardQuickAffordanceViewBinder lookup pending: " + t.getMessage());
         }
 
-        // 4. Hook LaunchableImageView to draw frosted glass backdrop directly behind the shortcut icon
+        // 4. Hook ImageView.onDraw
         try {
-            Class<?> launchableImageClass = XposedHelpers.findClass("com.android.systemui.animation.view.LaunchableImageView", lpparam.classLoader);
-
-            XposedBridge.hookAllMethods(launchableImageClass, "onDraw", new XC_MethodHook() {
+            XposedBridge.hookAllMethods(ImageView.class, "onDraw", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    if (shortcutButtons.isEmpty()) return;
                     View view = (View) param.thisObject;
-                    if (!isShortcutButton(view)) {
-                        return;
-                    }
+                    if (!isShortcutButton(view)) return;
 
                     Canvas canvas = (Canvas) param.args[0];
-                    if (canvas == null) {
-                        return;
+                    if (canvas != null) {
+                        renderFrostedBackdrop(view, canvas);
                     }
-
-                    renderFrostedBackdrop(view, canvas);
                 }
             });
-            Log.i(TAG, "Successfully hooked LaunchableImageView.onDraw for shortcuts!");
+            Log.i(TAG, "Successfully hooked ImageView.onDraw for shortcuts!");
         } catch (Throwable t) {
-            Log.e(TAG, "Failed to hook LaunchableImageView: " + t.getMessage(), t);
+            Log.e(TAG, "Failed to hook ImageView.onDraw: " + t.getMessage(), t);
         }
     }
 
@@ -186,11 +204,34 @@ public class XposedInit implements IXposedHookLoadPackage {
         if (button == null) return;
         shortcutButtons.add(button);
 
-        // Hide stock flat background drawable so it doesn't occlude our frosted glass
+        // Hide stock flat background drawable
         Drawable bg = button.getBackground();
-        if (bg != null && !(bg instanceof RippleDrawable)) {
-            // Replace with transparent or ripple-only background
-            button.setBackground(null);
+        if (bg != null) {
+            bg.setAlpha(0);
+        }
+
+        ensureClassHooked(button.getClass());
+    }
+
+    private static synchronized void ensureClassHooked(Class<?> clazz) {
+        if (clazz == null || clazz == ImageView.class || clazz == View.class) return;
+        if (hookedClasses.add(clazz)) {
+            try {
+                XposedBridge.hookAllMethods(clazz, "onDraw", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        View view = (View) param.thisObject;
+                        if (!isShortcutButton(view)) return;
+                        Canvas canvas = (Canvas) param.args[0];
+                        if (canvas != null) {
+                            renderFrostedBackdrop(view, canvas);
+                        }
+                    }
+                });
+                Log.i(TAG, "Dynamically hooked onDraw for subclass: " + clazz.getName());
+            } catch (Throwable t) {
+                Log.w(TAG, "Subclass onDraw hook skipped: " + t.getMessage());
+            }
         }
     }
 
@@ -216,6 +257,12 @@ public class XposedInit implements IXposedHookLoadPackage {
         int h = view.getHeight();
         if (w <= 0 || h <= 0) {
             return;
+        }
+
+        // Keep stock background transparent
+        Drawable bg = view.getBackground();
+        if (bg != null && bg.getAlpha() != 0) {
+            bg.setAlpha(0);
         }
 
         Context context = view.getContext();
@@ -261,7 +308,7 @@ public class XposedInit implements IXposedHookLoadPackage {
 
         try {
             if (onThemeChangedMethod != null && backdrop.lastUiMode != uiMode) {
-                onThemeChangedMethod.invoke(backdrop.drawable, uiMode);
+                onThemeChangedMethod.invoke(backdrop.drawable);
                 backdrop.lastUiMode = uiMode;
             }
 
@@ -300,7 +347,11 @@ public class XposedInit implements IXposedHookLoadPackage {
 
         try {
             if (providerClass == null && cl != null) {
-                providerClass = XposedHelpers.findClass("com.nothing.cardhost.frosted.FrostedBackdropProvider", cl);
+                try {
+                    providerClass = XposedHelpers.findClass("com.nothing.cardhost.frosted.FrostedBackdropProvider", cl);
+                } catch (Throwable ignored) {
+                    providerClass = XposedHelpers.findClass("com.nothing.systemui.widget.NTKeyguardFrostedBackdrop", cl);
+                }
             }
             if (providerClass == null) {
                 return null;
