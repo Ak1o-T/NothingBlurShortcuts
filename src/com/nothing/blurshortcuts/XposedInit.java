@@ -242,10 +242,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                         XposedBridge.hookMethod(m, new XC_MethodHook() {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                if (sIsDozing || sDozeAmount > 0.005f) {
-                                    param.setResult(null);
-                                    return;
-                                }
                                 try {
                                     Object drawScope = param.args[5];
                                     Object viewModel = param.args[3];
@@ -541,14 +537,33 @@ public class XposedInit implements IXposedHookLoadPackage {
                 XposedBridge.hookAllMethods(sscCls, "setIsDozing", new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sStatusBarStateController = param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Boolean) {
                             sIsDozing = (Boolean) param.args[0];
                         }
+                        try {
+                            sDozeAmount = (Float) XposedHelpers.getObjectField(param.thisObject, "mDozeAmount");
+                        } catch (Throwable ignored) {}
+                    }
+                });
+                XposedBridge.hookAllMethods(sscCls, "finishDozeAnimation", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sStatusBarStateController = param.thisObject;
+                        try {
+                            sDozeAmount = (Float) XposedHelpers.getObjectField(param.thisObject, "mDozeAmount");
+                        } catch (Throwable t) {
+                            sDozeAmount = 0.0f;
+                        }
+                        try {
+                            sIsDozing = (Boolean) XposedHelpers.getObjectField(param.thisObject, "mIsDozing");
+                        } catch (Throwable ignored) {}
                     }
                 });
                 XC_MethodHook dozeAmountHook = new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sStatusBarStateController = param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
                             sDozeAmount = (Float) param.args[0];
                         }
@@ -573,15 +588,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                         sAmbientState = param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Integer) {
                             sStatusBarState = (Integer) param.args[0];
-                        }
-                    }
-                });
-                XposedBridge.hookAllMethods(asCls, "setShadeExpanded", new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        sAmbientState = param.thisObject;
-                        if (param.args.length > 0 && param.args[0] instanceof Boolean) {
-                            sIsShadeExpanded = (Boolean) param.args[0];
                         }
                     }
                 });
@@ -686,24 +692,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                     View bgView = (View) param.thisObject;
-
-                    // 1. Instant AOD check (pure primitive read)
-                    if (sIsDozing || sDozeAmount > 0.005f) {
-                        cleanupBlur(bgView);
-                        return;
-                    }
-
-                    int state = sStatusBarState;
-                    if (sStatusBarStateController != null) {
-                        try {
-                            state = (Integer) XposedHelpers.getObjectField(sStatusBarStateController, "mState");
-                            sStatusBarState = state;
-                        } catch (Throwable ignored) {}
-                    }
-
                     View parent = (View) bgView.getParent();
 
-                    // 2. One-time caching of sStatusBarStateController & sAmbientState if not yet set
+                    // 1. One-time caching of sStatusBarStateController & sAmbientState if not yet set
                     if (sStatusBarStateController == null && parent != null) {
                         try {
                             Object ssc = XposedHelpers.getObjectField(parent, "mStatusBarStateController");
@@ -722,15 +713,43 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
                     }
 
-                    float lsToShade = sLsToShadeProgress;
-                    if (sAmbientState != null) {
+                    // 2. Read live status bar, shade & doze state directly from controller
+                    if (sStatusBarStateController != null) {
                         try {
-                            lsToShade = (Float) XposedHelpers.getObjectField(sAmbientState, "mLStoShadeProgress");
-                            sLsToShadeProgress = lsToShade;
+                            sDozeAmount = (Float) XposedHelpers.getObjectField(sStatusBarStateController, "mDozeAmount");
+                        } catch (Throwable ignored) {}
+                        try {
+                            sIsDozing = (Boolean) XposedHelpers.getObjectField(sStatusBarStateController, "mIsDozing");
+                        } catch (Throwable ignored) {}
+                        try {
+                            sStatusBarState = (Integer) XposedHelpers.getObjectField(sStatusBarStateController, "mState");
+                        } catch (Throwable ignored) {}
+                        try {
+                            sIsShadeExpanded = (Boolean) XposedHelpers.callMethod(sStatusBarStateController, "isExpanded");
                         } catch (Throwable ignored) {}
                     }
 
-                    // 3. Fast direct method invocation on parent row
+                    if (sAmbientState != null) {
+                        try {
+                            sLsToShadeProgress = (Float) XposedHelpers.getObjectField(sAmbientState, "mLStoShadeProgress");
+                        } catch (Throwable ignored) {}
+                        try {
+                            sFractionToShade = (Float) XposedHelpers.getObjectField(sAmbientState, "mFractionToShade");
+                        } catch (Throwable ignored) {}
+                    }
+
+                    // 3. Instant AOD check (seamless fade to black)
+                    if (sIsDozing || sDozeAmount > 0.005f) {
+                        cleanupBlur(bgView);
+                        return;
+                    }
+
+                    int state = sStatusBarState;
+                    float lsToShade = sLsToShadeProgress;
+                    float fractionToShade = sFractionToShade;
+                    boolean isShadeExpanded = sIsShadeExpanded;
+
+                    // 4. Fast direct method invocation on parent row
                     boolean isPinned = false;
                     boolean isColorized = false;
                     boolean isShelf = false;
@@ -765,19 +784,18 @@ public class XposedInit implements IXposedHookLoadPackage {
                         isShelf = true;
                     }
 
-                    // 4. Target determination:
+                    // 5. Target determination:
                     // State: 1 = KEYGUARD, 0 = SHADE, 2 = SHADE_LOCKED
-                    // When shade menu is opened over lockscreen, state transitions to 2 or lsToShade > 0.05f or sIsShadeExpanded is true.
-                    boolean isShadeOrMenu = (state != 1) || sIsShadeExpanded || (lsToShade > 0.05f) || (sFractionToShade > 0.05f);
+                    // When shade menu is opened over lockscreen, state transitions to 2 or lsToShade > 0.05f or fractionToShade > 0.05f or isShadeExpanded is true.
+                    boolean isShadeOrMenu = (state != 1) || isShadeExpanded || (lsToShade > 0.05f) || (fractionToShade > 0.05f);
 
                     // Lockscreen notifications (cards & shelf) ONLY when resting cleanly on lockscreen (state == 1)
                     boolean isLockscreenTarget = (state == 1)
-                            && (onKeyguard || rowOnKeyguard || isShelf)
                             && !isShadeOrMenu
                             && !isUserExpanded;
 
                     // Heads-up incoming pop-up notifications over active apps (state == 0 and actively pinned banner)
-                    boolean isHeadsUpTarget = (state == 0) && isPinned && !sIsShadeExpanded;
+                    boolean isHeadsUpTarget = (state == 0) && isPinned && !isShadeExpanded;
 
                     boolean isTarget = (isLockscreenTarget || isHeadsUpTarget) && !isColorized;
                     if (!isTarget) {
