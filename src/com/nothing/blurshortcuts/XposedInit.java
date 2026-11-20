@@ -11,6 +11,8 @@ import android.graphics.Path;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewParent;
@@ -19,7 +21,10 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Map;
+import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
@@ -60,6 +65,23 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static volatile boolean sWakingUp = false;
     private static volatile float sDozeAmount = 0.0f;
     private static volatile boolean sInitialized = false;
+
+    // Global tracking of all notification background views for instant zero-latency blur sleep/wake
+    private static final Set<View> sAllNotificationBackgrounds = Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<View, Boolean>()));
+    private static volatile Handler sMainHandler = null;
+
+    private static Handler getMainHandler() {
+        if (sMainHandler == null) {
+            synchronized (XposedInit.class) {
+                if (sMainHandler == null) {
+                    try {
+                        sMainHandler = new Handler(Looper.getMainLooper());
+                    } catch (Throwable ignored) {}
+                }
+            }
+        }
+        return sMainHandler;
+    }
 
     // Fast reusable draw objects (UI Thread only)
     private static final RectF sDrawRectF = new RectF();
@@ -513,33 +535,83 @@ public class XposedInit implements IXposedHookLoadPackage {
 
         // 5. Hook Notifications for Lockscreen & Heads-Up Frosted Blur Style
         try {
-            // Instant sleep/wake response via KeyguardViewMediator
+            // Instant zero-latency sleep/wake response via WakefulnessLifecycle & KeyguardViewMediator
             try {
-                Class<?> kvmCls = cl.loadClass("com.android.systemui.keyguard.KeyguardViewMediator");
-                XposedBridge.hookAllMethods(kvmCls, "onStartedGoingToSleep", new XC_MethodHook() {
+                Class<?> wlCls = cl.loadClass("com.android.systemui.keyguard.WakefulnessLifecycle");
+                XposedBridge.hookAllMethods(wlCls, "dispatchStartedGoingToSleep", new XC_MethodHook() {
                     @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         sIsDozing = true;
                         sGoingToSleep = true;
                         sWakingUp = false;
                         sDozeAmount = 1.0f;
-                        invalidateNotificationStack();
+                        clearAllNotificationBlurs();
                     }
                 });
+                XposedBridge.hookAllMethods(wlCls, "dispatchStartedWakingUp", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        handleWakingUp();
+                    }
+                });
+                Log.e(TAG, "WakefulnessLifecycle hooked for instant sleep/wake response!");
+            } catch (Throwable t) {
+                Log.e(TAG, "WakefulnessLifecycle hook check: " + t.getMessage());
+            }
+
+            try {
+                Class<?> kvmCls = cl.loadClass("com.android.systemui.keyguard.KeyguardViewMediator");
+                XC_MethodHook sleepKvmHook = new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        sIsDozing = true;
+                        sGoingToSleep = true;
+                        sWakingUp = false;
+                        sDozeAmount = 1.0f;
+                        clearAllNotificationBlurs();
+                    }
+                };
+                XposedBridge.hookAllMethods(kvmCls, "onStartedGoingToSleep", sleepKvmHook);
                 XposedBridge.hookAllMethods(kvmCls, "onStartedWakingUp", new XC_MethodHook() {
                     @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        sIsDozing = false;
-                        sGoingToSleep = false;
-                        sWakingUp = true;
-                        sDozeAmount = 0.0f;
-                        invalidateNotificationStack();
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        handleWakingUp();
                     }
                 });
                 Log.e(TAG, "KeyguardViewMediator hooked for instant sleep/wake response!");
             } catch (Throwable t) {
                 Log.e(TAG, "KeyguardViewMediator hook check: " + t.getMessage());
             }
+
+            try {
+                Class<?> soacCls = cl.loadClass("com.android.systemui.statusbar.phone.ScreenOffAnimationController");
+                XC_MethodHook screenOffHook = new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        sIsDozing = true;
+                        sGoingToSleep = true;
+                        sWakingUp = false;
+                        sDozeAmount = 1.0f;
+                        clearAllNotificationBlurs();
+                    }
+                };
+                try { XposedBridge.hookAllMethods(soacCls, "onStartedGoingToSleep", screenOffHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(soacCls, "startAnimation", screenOffHook); } catch (Throwable ignored) {}
+            } catch (Throwable ignored) {}
+
+            try {
+                Class<?> dozeCls = cl.loadClass("com.android.systemui.doze.DozeService");
+                XposedBridge.hookAllMethods(dozeCls, "onDreamingStarted", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        sIsDozing = true;
+                        sGoingToSleep = true;
+                        sWakingUp = false;
+                        sDozeAmount = 1.0f;
+                        clearAllNotificationBlurs();
+                    }
+                });
+            } catch (Throwable ignored) {}
 
             // Track Status Bar State & Dozing via StatusBarStateControllerImpl
             try {
@@ -579,11 +651,12 @@ public class XposedInit implements IXposedHookLoadPackage {
                             if (sIsDozing) {
                                 sGoingToSleep = true;
                                 sWakingUp = false;
+                                clearAllNotificationBlurs();
                             } else {
                                 sGoingToSleep = false;
-                            }
-                            if (wasDozing != sIsDozing) {
-                                invalidateNotificationStack();
+                                if (wasDozing) {
+                                    handleWakingUp();
+                                }
                             }
                         }
                         try {
@@ -604,8 +677,11 @@ public class XposedInit implements IXposedHookLoadPackage {
                             sIsDozing = (Boolean) XposedHelpers.getObjectField(param.thisObject, "mIsDozing");
                         } catch (Throwable ignored) {}
                         sGoingToSleep = false;
-                        sWakingUp = false;
-                        invalidateNotificationStack();
+                        if (sIsDozing) {
+                            clearAllNotificationBlurs();
+                        } else {
+                            handleWakingUp();
+                        }
                     }
                 });
                 XC_MethodHook dozeAmountHook = new XC_MethodHook() {
@@ -615,9 +691,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
                             float amt = (Float) param.args[0];
                             sDozeAmount = amt;
-                            if (amt > 0.01f && !sWakingUp) {
+                            if (amt > 0.001f && !sWakingUp) {
                                 sGoingToSleep = true;
-                            } else if (amt <= 0.01f) {
+                                clearAllNotificationBlurs();
+                            } else if (amt <= 0.001f) {
                                 sGoingToSleep = false;
                                 sWakingUp = false;
                             }
@@ -669,7 +746,18 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         sAmbientState = param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Boolean) {
+                            boolean wasDozing = sIsDozing;
                             sIsDozing = (Boolean) param.args[0];
+                            if (sIsDozing) {
+                                sGoingToSleep = true;
+                                sWakingUp = false;
+                                clearAllNotificationBlurs();
+                            } else {
+                                sGoingToSleep = false;
+                                if (wasDozing) {
+                                    handleWakingUp();
+                                }
+                            }
                         }
                     }
                 });
@@ -678,7 +766,15 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         sAmbientState = param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
-                            sDozeAmount = (Float) param.args[0];
+                            float amt = (Float) param.args[0];
+                            sDozeAmount = amt;
+                            if (amt > 0.001f && !sWakingUp) {
+                                sGoingToSleep = true;
+                                clearAllNotificationBlurs();
+                            } else if (amt <= 0.001f) {
+                                sGoingToSleep = false;
+                                sWakingUp = false;
+                            }
                         }
                     }
                 });
@@ -755,6 +851,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                     View bgView = (View) param.thisObject;
+                    sAllNotificationBackgrounds.add(bgView);
                     View parent = (View) bgView.getParent();
 
                     // 1. One-time caching of sStatusBarStateController & sAmbientState if not yet set
@@ -805,7 +902,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     // If device is dozing or starting to go to sleep:
                     // Immediately disable blur in SurfaceFlinger via cleanupBlur(bgView) and cancel onDraw!
                     // This makes notification blur disappear instantly alongside the bottom shortcuts when transition starts!
-                    if (sIsDozing || sGoingToSleep || (!sWakingUp && sDozeAmount > 0.01f)) {
+                    if (sIsDozing || sGoingToSleep || (!sWakingUp && sDozeAmount > 0.001f)) {
                         cleanupBlur(bgView);
                         param.setResult(null);
                         return;
@@ -961,6 +1058,9 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     if (blurDrawable != null) {
                         try {
+                            ((Drawable) blurDrawable).setVisible(true, false);
+                        } catch (Throwable ignored) {}
+                        try {
                             XposedHelpers.callMethod(blurDrawable, "setBlurRadius", 160);
                         } catch (Throwable ignored) {}
                         try {
@@ -1013,10 +1113,23 @@ public class XposedInit implements IXposedHookLoadPackage {
                 }
             };
 
+            XC_MethodHook registerBgViewHook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    if (param.thisObject instanceof View) {
+                        sAllNotificationBackgrounds.add((View) param.thisObject);
+                    }
+                }
+            };
+            try { XposedBridge.hookAllConstructors(notifBgClass, registerBgViewHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifBgClass, "onAttachedToWindow", registerBgViewHook); } catch (Throwable ignored) {}
+
             XposedBridge.hookAllMethods(notifBgClass, "onDraw", notifDrawHook);
             try {
                 Class<?> notifShelfBgClass = cl.loadClass("com.android.systemui.statusbar.notification.shelf.NotificationShelfBackgroundView");
                 if (notifShelfBgClass != null && notifShelfBgClass != notifBgClass) {
+                    try { XposedBridge.hookAllConstructors(notifShelfBgClass, registerBgViewHook); } catch (Throwable ignored) {}
+                    try { XposedBridge.hookAllMethods(notifShelfBgClass, "onAttachedToWindow", registerBgViewHook); } catch (Throwable ignored) {}
                     XposedBridge.hookAllMethods(notifShelfBgClass, "onDraw", notifDrawHook);
                 }
             } catch (Throwable ignored) {}
@@ -1121,28 +1234,106 @@ public class XposedInit implements IXposedHookLoadPackage {
     }
 
     private static void invalidateNotificationStack() {
-        if (sNsslView != null) {
-            sNsslView.post(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        if (sNsslView instanceof android.view.ViewGroup) {
-                            android.view.ViewGroup vg = (android.view.ViewGroup) sNsslView;
-                            for (int i = 0; i < vg.getChildCount(); i++) {
-                                View child = vg.getChildAt(i);
-                                if (child != null) {
-                                    child.invalidate();
-                                    try {
-                                        View bg = (View) XposedHelpers.getObjectField(child, "mBackgroundNormal");
-                                        if (bg != null) bg.invalidate();
-                                    } catch (Throwable ignored) {}
-                                }
-                            }
+        Runnable r = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    synchronized (sAllNotificationBackgrounds) {
+                        for (View bg : sAllNotificationBackgrounds) {
+                            if (bg != null) bg.invalidate();
                         }
+                    }
+                    if (sNsslView != null) {
                         sNsslView.invalidate();
-                    } catch (Throwable ignored) {}
+                    }
+                } catch (Throwable ignored) {}
+            }
+        };
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            r.run();
+        } else {
+            Handler h = getMainHandler();
+            if (h != null) h.post(r);
+            else if (sNsslView != null) sNsslView.post(r);
+        }
+    }
+
+    private static void clearAllNotificationBlurs() {
+        // 1. Synchronously on current thread: immediately set blur radius to 0 and hide drawable (zero latency)
+        synchronized (sAllNotificationBackgrounds) {
+            for (View bgView : sAllNotificationBackgrounds) {
+                cleanupBlur(bgView);
+            }
+        }
+
+        // 2. Schedule UI thread execution to invalidate views and force ViewRootImpl Aggregator to commit to SurfaceFlinger
+        Runnable action = new Runnable() {
+            @Override
+            public void run() {
+                synchronized (sAllNotificationBackgrounds) {
+                    for (View bgView : sAllNotificationBackgrounds) {
+                        cleanupBlur(bgView);
+                        if (bgView != null) {
+                            try { bgView.invalidate(); } catch (Throwable ignored) {}
+                        }
+                    }
                 }
-            });
+                if (sNsslView != null) {
+                    try { sNsslView.invalidate(); } catch (Throwable ignored) {}
+                }
+            }
+        };
+
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action.run();
+        } else {
+            Handler h = getMainHandler();
+            if (h != null) {
+                h.postAtFrontOfQueue(action);
+            } else if (sNsslView != null) {
+                sNsslView.post(action);
+            }
+        }
+    }
+
+    private static void handleWakingUp() {
+        sIsDozing = false;
+        sGoingToSleep = false;
+        sWakingUp = true;
+        sDozeAmount = 0.0f;
+
+        Runnable action = new Runnable() {
+            @Override
+            public void run() {
+                synchronized (sAllNotificationBackgrounds) {
+                    for (View bgView : sAllNotificationBackgrounds) {
+                        if (bgView != null) {
+                            try {
+                                Object bd = XposedHelpers.getObjectField(bgView, "mBackgroundBlurDrawable");
+                                if (bd != null) {
+                                    try { ((Drawable) bd).setVisible(true, false); } catch (Throwable ignored) {}
+                                    try { XposedHelpers.callMethod(bd, "setBlurRadius", 160); } catch (Throwable ignored) {}
+                                }
+                                bgView.invalidate();
+                            } catch (Throwable ignored) {}
+                        }
+                    }
+                }
+                if (sNsslView != null) {
+                    try { sNsslView.invalidate(); } catch (Throwable ignored) {}
+                }
+            }
+        };
+
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action.run();
+        } else {
+            Handler h = getMainHandler();
+            if (h != null) {
+                h.post(action);
+            } else if (sNsslView != null) {
+                sNsslView.post(action);
+            }
         }
     }
 
@@ -1151,8 +1342,12 @@ public class XposedInit implements IXposedHookLoadPackage {
         try {
             Object bd = XposedHelpers.getObjectField(bgView, "mBackgroundBlurDrawable");
             if (bd != null) {
-                XposedHelpers.callMethod(bd, "setBlurRadius", 0);
-                XposedHelpers.setObjectField(bgView, "mBackgroundBlurDrawable", null);
+                try {
+                    XposedHelpers.callMethod(bd, "setBlurRadius", 0);
+                } catch (Throwable ignored) {}
+                try {
+                    ((Drawable) bd).setVisible(false, false);
+                } catch (Throwable ignored) {}
             }
         } catch (Throwable ignored) {}
     }
