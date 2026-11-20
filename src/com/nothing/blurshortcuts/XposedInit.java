@@ -146,7 +146,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                         StackTraceElement[] st = Thread.currentThread().getStackTrace();
                         for (StackTraceElement ste : st) {
                             if (ste.getClassName().contains("ShortcutElementProvider")) {
-                                Log.e(TAG, "STRIPPED SOLID PLATE in BackgroundKt! Returning unbacked modifier.");
                                 param.setResult(param.args[0]);
                                 return;
                             }
@@ -175,13 +174,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                         m.setAccessible(true);
                         XposedBridge.hookMethod(m, new XC_MethodHook() {
                             @Override
-                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                Log.e(TAG, "shortcutBackground BEFORE: incoming modifier = " + param.args[0]);
-                            }
-
-                            @Override
                             protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                                Log.e(TAG, "shortcutBackground AFTER: replacing with transparent modifier = " + param.args[0]);
                                 param.setResult(param.args[0]);
                             }
                         });
@@ -371,6 +364,198 @@ public class XposedInit implements IXposedHookLoadPackage {
             Log.e(TAG, "Successfully hooked Compose ShortcutElementProvider!");
         } catch (Throwable t) {
             Log.e(TAG, "ShortcutElementProvider hook check: " + t.getMessage());
+        }
+
+        // 4. Hook Volume Dialog (Android 15 / Nothing OS 5.0 volume architecture)
+        try {
+            Class<?> volDialogClass = cl.loadClass("com.android.systemui.volume.dialog.VolumeDialog");
+            Log.e(TAG, "Found VolumeDialog class: " + volDialogClass);
+
+            XposedBridge.hookAllConstructors(volDialogClass, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    Log.e(TAG, "VolumeDialog constructor called!");
+                }
+            });
+
+            XposedBridge.hookAllMethods(volDialogClass, "show", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    android.app.Dialog dialog = (android.app.Dialog) param.thisObject;
+                    if (dialog != null && dialog.getWindow() != null) {
+                        View decor = dialog.getWindow().getDecorView();
+                        styleVolumeDialog(decor);
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            Log.e(TAG, "VolumeDialog class hook check: " + t.getMessage());
+        }
+
+        // Hook VolumeDialogViewBinder to apply authentic Frosted Glass styling
+        try {
+            Class<?> binderCls = cl.loadClass("com.android.systemui.volume.dialog.ui.binder.VolumeDialogViewBinder");
+            for (Method m : binderCls.getDeclaredMethods()) {
+                m.setAccessible(true);
+                if (m.getName().equals("applyAnimationProgress") || m.getName().equals("animateVisibility") || m.getName().equals("bind")) {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            for (Object arg : param.args) {
+                                if (arg instanceof View) {
+                                    styleVolumeDialog((View) arg);
+                                } else if (arg instanceof android.app.Dialog) {
+                                    android.app.Dialog d = (android.app.Dialog) arg;
+                                    if (d.getWindow() != null) {
+                                        styleVolumeDialog(d.getWindow().getDecorView());
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+            Log.e(TAG, "VolumeDialogViewBinder hooked for frosted glass styling!");
+        } catch (Throwable t) {
+            Log.e(TAG, "VolumeDialogViewBinder hook check: " + t.getMessage());
+        }
+
+        // Hook VolumeDialogRingerViewBinder to style ringer drawer
+        try {
+            Class<?> ringerBinderCls = cl.loadClass("com.android.systemui.volume.dialog.ringer.ui.binder.VolumeDialogRingerViewBinder");
+            for (Method m : ringerBinderCls.getDeclaredMethods()) {
+                m.setAccessible(true);
+                if (m.getName().equals("updateBackground") || m.getName().equals("bind") || m.getName().equals("setIsBlurSupported")) {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            for (Object arg : param.args) {
+                                if (arg instanceof View) {
+                                    styleVolumeDialog((View) arg);
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+            Log.e(TAG, "VolumeDialogRingerViewBinder hooked for frosted glass styling!");
+        } catch (Throwable t) {
+            Log.e(TAG, "VolumeDialogRingerViewBinder hook check: " + t.getMessage());
+        }
+
+        // Hook VolumeDialogSettingsButtonViewBinder
+        try {
+            Class<?> settingsBinderCls = cl.loadClass("com.android.systemui.volume.dialog.settings.ui.binder.VolumeDialogSettingsButtonViewBinder");
+            for (Method m : settingsBinderCls.getDeclaredMethods()) {
+                m.setAccessible(true);
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        for (Object arg : param.args) {
+                            if (arg instanceof View) {
+                                styleVolumeDialog((View) arg);
+                            }
+                        }
+                    }
+                });
+            }
+            Log.e(TAG, "VolumeDialogSettingsButtonViewBinder hooked for frosted glass styling!");
+        } catch (Throwable t) {
+            Log.e(TAG, "VolumeDialogSettingsButtonViewBinder hook check: " + t.getMessage());
+        }
+    }
+
+    private static void styleVolumeDialog(View root) {
+        if (root == null) return;
+        Context ctx = root.getContext();
+        if (ctx == null || ctx.getResources() == null) return;
+
+        int uiMode = ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+        boolean isDark = (uiMode == Configuration.UI_MODE_NIGHT_YES);
+
+        int tintColor = isDark ? 0x44000000 : 0x38FFFFFF;
+        int strokeColor = isDark ? 0x28FFFFFF : 0x45FFFFFF;
+        int strokeWidth = Math.max(2, Math.round(1.0f * ctx.getResources().getDisplayMetrics().density));
+
+        String pkg = ctx.getPackageName();
+
+        // 1. Remove solid opaque background plate from volume_expand_bar_container
+        int expandContainerId = root.getResources().getIdentifier("volume_expand_bar_container", "id", pkg);
+        if (expandContainerId != 0) {
+            View expandContainer = root.findViewById(expandContainerId);
+            if (expandContainer != null) {
+                if (expandContainer.getBackground() != null) {
+                    Log.e(TAG, "styleVolumeDialog: clearing background on volume_expand_bar_container (was " + expandContainer.getBackground().getClass().getSimpleName() + ")");
+                    expandContainer.setBackground(null);
+                }
+            }
+        }
+
+        // 2. Style volume_dialog_background (the main volume capsule)
+        int bgId = root.getResources().getIdentifier("volume_dialog_background", "id", pkg);
+        if (bgId != 0) {
+            View bgView = root.findViewById(bgId);
+            if (bgView != null) {
+                Log.e(TAG, "styleVolumeDialog: applying frosted glass to volume_dialog_background (isDark=" + isDark + ")");
+                applyFrostedGlassToDrawable(bgView.getBackground(), tintColor, strokeWidth, strokeColor);
+            }
+        }
+
+        // 3. Style ringer_buttons_background (the ringer drawer capsule)
+        int ringerBgId = root.getResources().getIdentifier("ringer_buttons_background", "id", pkg);
+        if (ringerBgId != 0) {
+            View ringerBg = root.findViewById(ringerBgId);
+            if (ringerBg != null) {
+                applyFrostedGlassToDrawable(ringerBg.getBackground(), tintColor, strokeWidth, strokeColor);
+            }
+        }
+
+        // 4. Style odi_captions if present
+        int captionsId = root.getResources().getIdentifier("odi_captions", "id", pkg);
+        if (captionsId != 0) {
+            View captionsView = root.findViewById(captionsId);
+            if (captionsView != null) {
+                applyFrostedGlassToDrawable(captionsView.getBackground(), tintColor, strokeWidth, strokeColor);
+            }
+        }
+
+        // 5. Style accessibility & assistant sliders if present
+        int a11yId = root.getResources().getIdentifier("accessibility_slider_container", "id", pkg);
+        if (a11yId != 0) {
+            View a11yView = root.findViewById(a11yId);
+            if (a11yView != null) {
+                applyFrostedGlassToDrawable(a11yView.getBackground(), tintColor, strokeWidth, strokeColor);
+            }
+        }
+
+        int assistantId = root.getResources().getIdentifier("assistant_slider_container", "id", pkg);
+        if (assistantId != 0) {
+            View assistantView = root.findViewById(assistantId);
+            if (assistantView != null) {
+                applyFrostedGlassToDrawable(assistantView.getBackground(), tintColor, strokeWidth, strokeColor);
+            }
+        }
+    }
+
+    private static void applyFrostedGlassToDrawable(Drawable bg, int tintColor, int strokeWidth, int strokeColor) {
+        if (bg == null) return;
+        android.graphics.drawable.GradientDrawable gd = null;
+        if (bg instanceof android.graphics.drawable.LayerDrawable) {
+            android.graphics.drawable.LayerDrawable ld = (android.graphics.drawable.LayerDrawable) bg;
+            for (int i = 0; i < ld.getNumberOfLayers(); i++) {
+                Drawable d = ld.getDrawable(i);
+                if (d instanceof android.graphics.drawable.GradientDrawable) {
+                    gd = (android.graphics.drawable.GradientDrawable) d;
+                    break;
+                }
+            }
+        } else if (bg instanceof android.graphics.drawable.GradientDrawable) {
+            gd = (android.graphics.drawable.GradientDrawable) bg;
+        }
+
+        if (gd != null) {
+            gd.setColor(tintColor);
+            gd.setStroke(strokeWidth, strokeColor);
         }
     }
 
