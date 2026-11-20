@@ -91,20 +91,33 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static final Path sClipPath = new Path();
     private static final float[] sCornerRadii = new float[8];
 
-    // Pre-reflected fast methods for notification rows
-    private static Method sIsOnKeyguardMethod = null;
-    private static Method sIsUserExpandedMethod = null;
-    private static Method sIsShowingExpandedMethod = null;
-    private static Method sIsGroupExpandedMethod = null;
-    private static Method sHasUserChangedExpansionMethod = null;
-    private static Method sIsExpandedMethod = null;
-    private static Method sAreChildrenExpandedMethod = null;
-    private static Method sIsChildInGroupMethod = null;
+    // Pre-reflected fast fields & methods for 120 FPS notification rendering
+    private static volatile boolean sNotificationBlursCleared = false;
+    private static volatile boolean sAmbientStateLookupAttempted = false;
+
+    private static Field sStateField = null;
+    private static Field sLStoShadeProgressField = null;
+    private static Field sFractionToShadeField = null;
+    private static Field sBackgroundTopField = null;
+    private static Field sActualWidthField = null;
+    private static Field sActualHeightField = null;
+    private static Field sClipTopAmountField = null;
+    private static Field sClipBottomAmountField = null;
+    private static Field sBackgroundBlurDrawableField = null;
+    private static Field sBackgroundNormalField = null;
+    private static Field sBackgroundDimmedField = null;
+    private static Field sShowNoBackgroundField = null;
+    private static Method sIsShowNoBackgroundMethod = null;
+    private static Method sGetActualHeightMethod = null;
+    private static Method sCreateBackgroundBlurDrawableMethod = null;
+    private static Method sSetBlurRadiusMethod = null;
+    private static Method sSetCornerRadiusMethod = null;
+    private static Method sSetCornerRadiusSingleMethod = null;
+
     private static Method sIsPinnedMethod = null;
     private static Method sIsColorizedMethod = null;
     private static Method sGetTopCornerRadiusMethod = null;
     private static Method sGetBottomCornerRadiusMethod = null;
-    private static Method sShelfIsOnKeyguardMethod = null;
 
     private static final Paint glassTintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint glassBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -831,12 +844,14 @@ public class XposedInit implements IXposedHookLoadPackage {
             // Track Status Bar State via StatusBarStateControllerImpl
             try {
                 Class<?> sscCls = cl.loadClass("com.android.systemui.statusbar.StatusBarStateControllerImpl");
+                try { sStateField = sscCls.getDeclaredField("mState"); sStateField.setAccessible(true); } catch (Throwable ignored) {}
                 XposedBridge.hookAllConstructors(sscCls, new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         sStatusBarStateController = param.thisObject;
                         try {
-                            sStatusBarState = (Integer) XposedHelpers.getObjectField(param.thisObject, "mState");
+                            if (sStateField != null) sStatusBarState = sStateField.getInt(param.thisObject);
+                            else sStatusBarState = (Integer) XposedHelpers.getObjectField(param.thisObject, "mState");
                         } catch (Throwable ignored) {}
                     }
                 });
@@ -863,6 +878,8 @@ public class XposedInit implements IXposedHookLoadPackage {
             // Track state via AmbientState
             try {
                 Class<?> asCls = cl.loadClass("com.android.systemui.statusbar.notification.stack.AmbientState");
+                try { sLStoShadeProgressField = asCls.getDeclaredField("mLStoShadeProgress"); sLStoShadeProgressField.setAccessible(true); } catch (Throwable ignored) {}
+                try { sFractionToShadeField = asCls.getDeclaredField("mFractionToShade"); sFractionToShadeField.setAccessible(true); } catch (Throwable ignored) {}
                 XposedBridge.hookAllConstructors(asCls, new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
@@ -1001,7 +1018,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
                     });
                 } catch (Throwable ignored) {}
-                try { sShelfIsOnKeyguardMethod = shelfCls.getMethod("isOnKeyguard"); sShelfIsOnKeyguardMethod.setAccessible(true); } catch (Throwable ignored) {}
             }
 
             try {
@@ -1042,19 +1058,35 @@ public class XposedInit implements IXposedHookLoadPackage {
                 });
             } catch (Throwable ignored) {}
 
-            // Pre-reflect methods on ExpandableNotificationRow for maximum 120 FPS performance
-            try { sIsOnKeyguardMethod = notifRowClass.getMethod("isOnKeyguard"); sIsOnKeyguardMethod.setAccessible(true); } catch (Throwable ignored) {}
-            try { sIsUserExpandedMethod = notifRowClass.getMethod("isUserExpanded"); sIsUserExpandedMethod.setAccessible(true); } catch (Throwable ignored) {}
-            try { sIsShowingExpandedMethod = notifRowClass.getMethod("isShowingExpanded"); sIsShowingExpandedMethod.setAccessible(true); } catch (Throwable ignored) {}
-            try { sIsGroupExpandedMethod = notifRowClass.getMethod("isGroupExpanded"); sIsGroupExpandedMethod.setAccessible(true); } catch (Throwable ignored) {}
-            try { sHasUserChangedExpansionMethod = notifRowClass.getMethod("hasUserChangedExpansion"); sHasUserChangedExpansionMethod.setAccessible(true); } catch (Throwable ignored) {}
-            try { sIsExpandedMethod = notifRowClass.getMethod("isExpanded"); sIsExpandedMethod.setAccessible(true); } catch (Throwable ignored) {}
-            try { sAreChildrenExpandedMethod = notifRowClass.getMethod("areChildrenExpanded"); sAreChildrenExpandedMethod.setAccessible(true); } catch (Throwable ignored) {}
-            try { sIsChildInGroupMethod = notifRowClass.getMethod("isChildInGroup"); sIsChildInGroupMethod.setAccessible(true); } catch (Throwable ignored) {}
+            // Pre-reflect methods & fields on ExpandableNotificationRow and NotificationBackgroundView
             try { sIsPinnedMethod = notifRowClass.getMethod("isPinned"); sIsPinnedMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sIsColorizedMethod = notifRowClass.getMethod("isColorized"); sIsColorizedMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sGetTopCornerRadiusMethod = notifRowClass.getMethod("getTopCornerRadius"); sGetTopCornerRadiusMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sGetBottomCornerRadiusMethod = notifRowClass.getMethod("getBottomCornerRadius"); sGetBottomCornerRadiusMethod.setAccessible(true); } catch (Throwable ignored) {}
+            try { sGetActualHeightMethod = notifRowClass.getMethod("getActualHeight"); sGetActualHeightMethod.setAccessible(true); } catch (Throwable ignored) {}
+            try { sIsShowNoBackgroundMethod = notifRowClass.getMethod("isShowNoBackground"); sIsShowNoBackgroundMethod.setAccessible(true); } catch (Throwable ignored) {}
+            try { sShowNoBackgroundField = notifRowClass.getDeclaredField("mShowNoBackground"); sShowNoBackgroundField.setAccessible(true); } catch (Throwable ignored) {}
+            try { sBackgroundNormalField = notifRowClass.getDeclaredField("mBackgroundNormal"); sBackgroundNormalField.setAccessible(true); } catch (Throwable ignored) {}
+            try { sBackgroundDimmedField = notifRowClass.getDeclaredField("mBackgroundDimmed"); sBackgroundDimmedField.setAccessible(true); } catch (Throwable ignored) {}
+
+            try { sBackgroundTopField = notifBgClass.getDeclaredField("mBackgroundTop"); sBackgroundTopField.setAccessible(true); } catch (Throwable ignored) {}
+            try { sActualWidthField = notifBgClass.getDeclaredField("mActualWidth"); sActualWidthField.setAccessible(true); } catch (Throwable ignored) {}
+            try { sActualHeightField = notifBgClass.getDeclaredField("mActualHeight"); sActualHeightField.setAccessible(true); } catch (Throwable ignored) {}
+            try { sClipTopAmountField = notifBgClass.getDeclaredField("mClipTopAmount"); sClipTopAmountField.setAccessible(true); } catch (Throwable ignored) {}
+            try { sClipBottomAmountField = notifBgClass.getDeclaredField("mClipBottomAmount"); sClipBottomAmountField.setAccessible(true); } catch (Throwable ignored) {}
+            try { sBackgroundBlurDrawableField = notifBgClass.getDeclaredField("mBackgroundBlurDrawable"); sBackgroundBlurDrawableField.setAccessible(true); } catch (Throwable ignored) {}
+
+            try {
+                Class<?> bbdCls = cl.loadClass("com.android.internal.graphics.drawable.BackgroundBlurDrawable");
+                try { sSetBlurRadiusMethod = bbdCls.getMethod("setBlurRadius", int.class); sSetBlurRadiusMethod.setAccessible(true); } catch (Throwable ignored) {}
+                try { sSetCornerRadiusMethod = bbdCls.getMethod("setCornerRadius", float.class, float.class, float.class, float.class); sSetCornerRadiusMethod.setAccessible(true); } catch (Throwable ignored) {}
+                try { sSetCornerRadiusSingleMethod = bbdCls.getMethod("setCornerRadius", float.class); sSetCornerRadiusSingleMethod.setAccessible(true); } catch (Throwable ignored) {}
+            } catch (Throwable ignored) {}
+            try {
+                Class<?> vriCls = cl.loadClass("android.view.ViewRootImpl");
+                sCreateBackgroundBlurDrawableMethod = vriCls.getMethod("createBackgroundBlurDrawable");
+                sCreateBackgroundBlurDrawableMethod.setAccessible(true);
+            } catch (Throwable ignored) {}
 
             XC_MethodHook rowExpansionHook = new XC_MethodHook() {
                 @Override
@@ -1062,31 +1094,29 @@ public class XposedInit implements IXposedHookLoadPackage {
                     View row = (View) param.thisObject;
                     if (row != null) {
                         row.invalidate();
-                        try {
-                            View bgNormal = (View) XposedHelpers.getObjectField(row, "mBackgroundNormal");
-                            if (bgNormal != null) {
-                                bgNormal.invalidate();
-                            }
-                        } catch (Throwable ignored) {}
-                        try {
-                            View bgDimmed = (View) XposedHelpers.getObjectField(row, "mBackgroundDimmed");
-                            if (bgDimmed != null) {
-                                bgDimmed.invalidate();
-                            }
-                        } catch (Throwable ignored) {}
+                        if (sBackgroundNormalField != null) {
+                            try {
+                                View bgNormal = (View) sBackgroundNormalField.get(row);
+                                if (bgNormal != null) bgNormal.invalidate();
+                            } catch (Throwable ignored) {}
+                        }
+                        if (sBackgroundDimmedField != null) {
+                            try {
+                                View bgDimmed = (View) sBackgroundDimmedField.get(row);
+                                if (bgDimmed != null) bgDimmed.invalidate();
+                            } catch (Throwable ignored) {}
+                        }
                     }
                 }
             };
             try { XposedBridge.hookAllMethods(notifRowClass, "setUserExpanded", rowExpansionHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifRowClass, "setShowingExpanded", rowExpansionHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifRowClass, "setGroupExpanded", rowExpansionHook); } catch (Throwable ignored) {}
-            try { XposedBridge.hookAllMethods(notifRowClass, "onExpansionChanged", rowExpansionHook); } catch (Throwable ignored) {}
 
             XC_MethodHook notifDrawHook = new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                     View bgView = (View) param.thisObject;
-                    sAllNotificationBackgrounds.add(bgView);
                     View parent = (View) bgView.getParent();
 
                     // 1. One-time caching of sStatusBarStateController & sAmbientState if not yet set
@@ -1096,7 +1126,8 @@ public class XposedInit implements IXposedHookLoadPackage {
                             if (ssc != null) sStatusBarStateController = ssc;
                         } catch (Throwable ignored) {}
                     }
-                    if (sAmbientState == null && parent != null) {
+                    if (sAmbientState == null && parent != null && !sAmbientStateLookupAttempted) {
+                        sAmbientStateLookupAttempted = true;
                         View v = parent;
                         while (v != null) {
                             try {
@@ -1120,20 +1151,20 @@ public class XposedInit implements IXposedHookLoadPackage {
                         } catch (Throwable ignored) {}
                     }
 
-                    // 2. Read live status bar & shade state directly from controller
-                    if (sStatusBarStateController != null) {
+                    // 2. Read live status bar & shade state directly from controller (fast direct Field read)
+                    if (sStatusBarStateController != null && sStateField != null) {
                         try {
-                            int st = (Integer) XposedHelpers.getObjectField(sStatusBarStateController, "mState");
+                            int st = sStateField.getInt(sStatusBarStateController);
                             if (sStatusBarState != st) {
                                 onStatusBarStateChanged(sStatusBarState, st);
                             }
                         } catch (Throwable ignored) {}
                     }
 
-                    if (sAmbientState != null) {
+                    if (sAmbientState != null && (sLStoShadeProgressField != null || sFractionToShadeField != null)) {
                         try {
-                            float ls = (Float) XposedHelpers.getObjectField(sAmbientState, "mLStoShadeProgress");
-                            float frac = (Float) XposedHelpers.getObjectField(sAmbientState, "mFractionToShade");
+                            float ls = (sLStoShadeProgressField != null) ? sLStoShadeProgressField.getFloat(sAmbientState) : 0f;
+                            float frac = (sFractionToShadeField != null) ? sFractionToShadeField.getFloat(sAmbientState) : 0f;
                             if (sStatusBarState != 1 || ls > 0.05f || frac > 0.05f) {
                                 sLsToShadeProgress = ls;
                                 sFractionToShade = frac;
@@ -1209,12 +1240,10 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     boolean showNoBg = false;
                     if (parent != null) {
-                        try {
-                            showNoBg = (Boolean) XposedHelpers.callMethod(parent, "isShowNoBackground");
-                        } catch (Throwable t) {
-                            try {
-                                showNoBg = (Boolean) XposedHelpers.getObjectField(parent, "mShowNoBackground");
-                            } catch (Throwable ignored) {}
+                        if (sIsShowNoBackgroundMethod != null) {
+                            try { showNoBg = (Boolean) sIsShowNoBackgroundMethod.invoke(parent); } catch (Throwable ignored) {}
+                        } else if (sShowNoBackgroundField != null) {
+                            try { showNoBg = sShowNoBackgroundField.getBoolean(parent); } catch (Throwable ignored) {}
                         }
                     }
                     if (showNoBg) {
@@ -1224,24 +1253,34 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
 
                     int bgTop = 0;
-                    try { bgTop = (Integer) XposedHelpers.getObjectField(bgView, "mBackgroundTop"); } catch (Throwable ignored) {}
+                    if (sBackgroundTopField != null) {
+                        try { bgTop = sBackgroundTopField.getInt(bgView); } catch (Throwable ignored) {}
+                    }
                     int actualWidth = 0;
-                    try { actualWidth = (Integer) XposedHelpers.getObjectField(bgView, "mActualWidth"); } catch (Throwable ignored) {}
+                    if (sActualWidthField != null) {
+                        try { actualWidth = sActualWidthField.getInt(bgView); } catch (Throwable ignored) {}
+                    }
                     int actualHeight = 0;
-                    try { actualHeight = (Integer) XposedHelpers.getObjectField(bgView, "mActualHeight"); } catch (Throwable ignored) {}
+                    if (sActualHeightField != null) {
+                        try { actualHeight = sActualHeightField.getInt(bgView); } catch (Throwable ignored) {}
+                    }
 
                     if (actualWidth <= 0) actualWidth = bgView.getWidth();
                     if (actualHeight <= 0) {
-                        if (parent != null) {
-                            try { actualHeight = (Integer) XposedHelpers.callMethod(parent, "getActualHeight"); } catch (Throwable ignored) {}
+                        if (parent != null && sGetActualHeightMethod != null) {
+                            try { actualHeight = (Integer) sGetActualHeightMethod.invoke(parent); } catch (Throwable ignored) {}
                         }
                         if (actualHeight <= 0) actualHeight = bgView.getHeight();
                     }
 
                     int clipTop = 0;
-                    try { clipTop = (Integer) XposedHelpers.getObjectField(bgView, "mClipTopAmount"); } catch (Throwable ignored) {}
+                    if (sClipTopAmountField != null) {
+                        try { clipTop = sClipTopAmountField.getInt(bgView); } catch (Throwable ignored) {}
+                    }
                     int clipBottom = 0;
-                    try { clipBottom = (Integer) XposedHelpers.getObjectField(bgView, "mClipBottomAmount"); } catch (Throwable ignored) {}
+                    if (sClipBottomAmountField != null) {
+                        try { clipBottom = sClipBottomAmountField.getInt(bgView); } catch (Throwable ignored) {}
+                    }
 
                     int drawLeft = 0;
                     int drawRight = actualWidth;
@@ -1271,15 +1310,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                                     bottomRadius = br;
                                 }
                             } catch (Throwable ignored) {}
-                        } else {
-                            try {
-                                Float tr = (Float) XposedHelpers.callMethod(parent, "getTopCornerRadius");
-                                Float br = (Float) XposedHelpers.callMethod(parent, "getBottomCornerRadius");
-                                if (tr != null && br != null && (tr > 0f || br > 0f)) {
-                                    topRadius = tr;
-                                    bottomRadius = br;
-                                }
-                            } catch (Throwable ignored) {}
                         }
                     }
 
@@ -1303,16 +1333,24 @@ public class XposedInit implements IXposedHookLoadPackage {
                     if (isTarget) {
                         // Frosted Glass Blur Mode (Lockscreen resting collapsed & Heads-Up alerts)
                         Object blurDrawable = null;
-                        try {
-                            blurDrawable = XposedHelpers.getObjectField(bgView, "mBackgroundBlurDrawable");
-                        } catch (Throwable ignored) {}
+                        if (sBackgroundBlurDrawableField != null) {
+                            try { blurDrawable = sBackgroundBlurDrawableField.get(bgView); } catch (Throwable ignored) {}
+                        }
 
                         if (blurDrawable == null) {
                             try {
                                 Object vri = XposedHelpers.callMethod(bgView, "getViewRootImpl");
                                 if (vri != null) {
-                                    blurDrawable = XposedHelpers.callMethod(vri, "createBackgroundBlurDrawable");
-                                    XposedHelpers.setObjectField(bgView, "mBackgroundBlurDrawable", blurDrawable);
+                                    if (sCreateBackgroundBlurDrawableMethod != null) {
+                                        blurDrawable = sCreateBackgroundBlurDrawableMethod.invoke(vri);
+                                    } else {
+                                        blurDrawable = XposedHelpers.callMethod(vri, "createBackgroundBlurDrawable");
+                                    }
+                                    if (sBackgroundBlurDrawableField != null) {
+                                        sBackgroundBlurDrawableField.set(bgView, blurDrawable);
+                                    } else {
+                                        XposedHelpers.setObjectField(bgView, "mBackgroundBlurDrawable", blurDrawable);
+                                    }
                                 }
                             } catch (Throwable ignored) {}
                         }
@@ -1321,15 +1359,15 @@ public class XposedInit implements IXposedHookLoadPackage {
                             try {
                                 ((Drawable) blurDrawable).setVisible(true, false);
                             } catch (Throwable ignored) {}
-                            try {
-                                XposedHelpers.callMethod(blurDrawable, "setBlurRadius", 160);
-                            } catch (Throwable ignored) {}
-                            try {
-                                XposedHelpers.callMethod(blurDrawable, "setCornerRadius", topRadius, topRadius, bottomRadius, bottomRadius);
-                            } catch (Throwable t) {
-                                try {
-                                    XposedHelpers.callMethod(blurDrawable, "setCornerRadius", Math.max(topRadius, bottomRadius));
-                                } catch (Throwable ignored) {}
+                            if (sSetBlurRadiusMethod != null) {
+                                try { sSetBlurRadiusMethod.invoke(blurDrawable, 160); } catch (Throwable ignored) {}
+                            } else {
+                                try { XposedHelpers.callMethod(blurDrawable, "setBlurRadius", 160); } catch (Throwable ignored) {}
+                            }
+                            if (sSetCornerRadiusMethod != null) {
+                                try { sSetCornerRadiusMethod.invoke(blurDrawable, topRadius, topRadius, bottomRadius, bottomRadius); } catch (Throwable ignored) {}
+                            } else if (sSetCornerRadiusSingleMethod != null) {
+                                try { sSetCornerRadiusSingleMethod.invoke(blurDrawable, Math.max(topRadius, bottomRadius)); } catch (Throwable ignored) {}
                             }
                             Drawable bd = (Drawable) blurDrawable;
                             bd.setBounds(drawLeft, drawTop, drawRight, drawBottom);
@@ -1517,29 +1555,46 @@ public class XposedInit implements IXposedHookLoadPackage {
     }
 
     private static void onStatusBarStateChanged(int oldState, int newState) {
+        if (sStatusBarState == newState && oldState == newState) return;
         sStatusBarState = newState;
         Log.i(TAG, "onStatusBarStateChanged: " + oldState + " -> " + newState);
         if (newState == 1) {
             sLsToShadeProgress = 0f;
             sFractionToShade = 0f;
             if (sAmbientState != null) {
-                try { XposedHelpers.setObjectField(sAmbientState, "mLStoShadeProgress", 0f); } catch (Throwable ignored) {}
-                try { XposedHelpers.setObjectField(sAmbientState, "mFractionToShade", 0f); } catch (Throwable ignored) {}
+                if (sLStoShadeProgressField != null) {
+                    try { sLStoShadeProgressField.setFloat(sAmbientState, 0f); } catch (Throwable ignored) {}
+                }
+                if (sFractionToShadeField != null) {
+                    try { sFractionToShadeField.setFloat(sAmbientState, 0f); } catch (Throwable ignored) {}
+                }
             }
         }
         if (newState == 0 || newState == 2) {
-            clearAllNotificationBlurs();
+            if (!sNotificationBlursCleared) {
+                sNotificationBlursCleared = true;
+                clearAllNotificationBlurs();
+            }
         } else if (newState == 1 && sScreenAwake && !sBouncerShowing) {
-            invalidateNotificationStack();
+            if (sNotificationBlursCleared) {
+                sNotificationBlursCleared = false;
+                invalidateNotificationStack();
+            }
         }
     }
 
     private static void onLsToShadeProgressChanged(float progress) {
         sLsToShadeProgress = progress;
         if (progress > 0.20f) {
-            clearAllNotificationBlurs();
+            if (!sNotificationBlursCleared) {
+                sNotificationBlursCleared = true;
+                clearAllNotificationBlurs();
+            }
         } else if (progress <= 0.05f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
-            invalidateNotificationStack();
+            if (sNotificationBlursCleared) {
+                sNotificationBlursCleared = false;
+                invalidateNotificationStack();
+            }
         }
     }
 
@@ -1682,11 +1737,18 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static void cleanupBlur(View bgView) {
         if (bgView == null) return;
         try {
-            Object bd = XposedHelpers.getObjectField(bgView, "mBackgroundBlurDrawable");
+            Object bd = null;
+            if (sBackgroundBlurDrawableField != null) {
+                bd = sBackgroundBlurDrawableField.get(bgView);
+            } else {
+                bd = XposedHelpers.getObjectField(bgView, "mBackgroundBlurDrawable");
+            }
             if (bd != null) {
-                try {
-                    XposedHelpers.callMethod(bd, "setBlurRadius", 0);
-                } catch (Throwable ignored) {}
+                if (sSetBlurRadiusMethod != null) {
+                    try { sSetBlurRadiusMethod.invoke(bd, 0); } catch (Throwable ignored) {}
+                } else {
+                    try { XposedHelpers.callMethod(bd, "setBlurRadius", 0); } catch (Throwable ignored) {}
+                }
                 try {
                     ((Drawable) bd).setVisible(false, false);
                 } catch (Throwable ignored) {}
