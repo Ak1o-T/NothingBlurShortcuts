@@ -120,6 +120,9 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static Method sGetTopCornerRadiusMethod = null;
     private static Method sGetBottomCornerRadiusMethod = null;
 
+    private static Object sLucentColorUtilsInstance = null;
+    private static Method sGetLucentColorMethod = null;
+
     private static final Paint glassTintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint glassBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint solidBgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -223,6 +226,16 @@ public class XposedInit implements IXposedHookLoadPackage {
             Log.e(TAG, "FrostedBackdropDrawable methods reflected successfully!");
         } catch (Throwable t) {
             Log.e(TAG, "Frosted classes check: " + t.getMessage());
+        }
+
+        try {
+            Class<?> lucentCls = cl.loadClass("com.nothing.commBase.lucent.LucentColorUtils");
+            sLucentColorUtilsInstance = XposedHelpers.getStaticObjectField(lucentCls, "INSTANCE");
+            sGetLucentColorMethod = lucentCls.getMethod("getLucentColor", Context.class, String.class);
+            sGetLucentColorMethod.setAccessible(true);
+            Log.e(TAG, "LucentColorUtils reflected successfully!");
+        } catch (Throwable t) {
+            Log.e(TAG, "LucentColorUtils check: " + t.getMessage());
         }
 
         // 3. Hook Jetpack Compose Lockscreen Shortcuts: ShortcutElementProvider
@@ -1411,13 +1424,15 @@ public class XposedInit implements IXposedHookLoadPackage {
                             bd.draw(canvas);
                         }
 
+                        int frostedColor = getFrostedBackdropColor(ctx, isDark);
+                        glassTintPaint.setColor(frostedColor);
+
                         if (isDark) {
-                            glassTintPaint.setColor(0x44000000);
                             glassBorderPaint.setColor(0x28FFFFFF);
                         } else {
-                            glassTintPaint.setColor(0x38FFFFFF);
-                            glassBorderPaint.setColor(0x45FFFFFF);
+                            glassBorderPaint.setColor(0x35FFFFFF);
                         }
+                        glassBorderPaint.setStrokeWidth(1.0f * densityF);
 
                         canvas.drawPath(sClipPath, glassTintPaint);
                         canvas.drawPath(sClipPath, glassBorderPaint);
@@ -1505,8 +1520,8 @@ public class XposedInit implements IXposedHookLoadPackage {
         int uiMode = ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
         boolean isDark = (uiMode == Configuration.UI_MODE_NIGHT_YES);
 
-        int tintColor = isDark ? 0x44000000 : 0x38FFFFFF;
-        int strokeColor = isDark ? 0x28FFFFFF : 0x45FFFFFF;
+        int tintColor = getFrostedBackdropColor(ctx, isDark);
+        int strokeColor = isDark ? 0x28FFFFFF : 0x35FFFFFF;
         int strokeWidth = Math.max(2, Math.round(1.0f * ctx.getResources().getDisplayMetrics().density));
 
         String pkg = ctx.getPackageName();
@@ -1792,6 +1807,16 @@ public class XposedInit implements IXposedHookLoadPackage {
             h.postDelayed(sWakeInvalidateRunnable, 150);
             h.postDelayed(sWakeInvalidateRunnable, 300);
         }
+    }
+
+    private static int getFrostedBackdropColor(Context ctx, boolean isDark) {
+        if (sLucentColorUtilsInstance != null && sGetLucentColorMethod != null && ctx != null) {
+            try {
+                int c = (Integer) sGetLucentColorMethod.invoke(sLucentColorUtilsInstance, ctx, "container_frosted_backdrop");
+                if (c != 0) return c;
+            } catch (Throwable ignored) {}
+        }
+        return isDark ? 0x44000000 : 0x66FFFFFF;
     }
 
     private static void cleanupBlur(View bgView) {
