@@ -611,6 +611,22 @@ public class XposedInit implements IXposedHookLoadPackage {
                         clearAllNotificationBlurs();
                     }
                 });
+                XposedBridge.hookAllMethods(dozeCls, "onDreamingStopped", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        handleWakingUp();
+                    }
+                });
+            } catch (Throwable ignored) {}
+
+            try {
+                Class<?> kumCls = cl.loadClass("com.android.keyguard.KeyguardUpdateMonitor");
+                XposedBridge.hookAllMethods(kumCls, "dispatchStartedWakingUp", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        handleWakingUp();
+                    }
+                });
             } catch (Throwable ignored) {}
 
             // Track Status Bar State & Dozing via StatusBarStateControllerImpl
@@ -899,10 +915,11 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
 
                     // 3. AOD / Sleep check:
-                    // If device is dozing or starting to go to sleep:
+                    // If device is dozing or starting to go to sleep (and NOT in waking up phase):
                     // Immediately disable blur in SurfaceFlinger via cleanupBlur(bgView) and cancel onDraw!
                     // This makes notification blur disappear instantly alongside the bottom shortcuts when transition starts!
-                    if (sIsDozing || sGoingToSleep || (!sWakingUp && sDozeAmount > 0.001f)) {
+                    // When waking up (sWakingUp == true), blur is drawn immediately on frame 0 without being blocked!
+                    if (!sWakingUp && (sIsDozing || sGoingToSleep || sDozeAmount > 0.001f)) {
                         cleanupBlur(bgView);
                         param.setResult(null);
                         return;
@@ -1302,6 +1319,22 @@ public class XposedInit implements IXposedHookLoadPackage {
         sWakingUp = true;
         sDozeAmount = 0.0f;
 
+        // 1. Synchronously on current thread: immediately re-enable blur in all drawables (zero latency)
+        synchronized (sAllNotificationBackgrounds) {
+            for (View bgView : sAllNotificationBackgrounds) {
+                if (bgView != null) {
+                    try {
+                        Object bd = XposedHelpers.getObjectField(bgView, "mBackgroundBlurDrawable");
+                        if (bd != null) {
+                            try { ((Drawable) bd).setVisible(true, false); } catch (Throwable ignored) {}
+                            try { XposedHelpers.callMethod(bd, "setBlurRadius", 160); } catch (Throwable ignored) {}
+                        }
+                    } catch (Throwable ignored) {}
+                }
+            }
+        }
+
+        // 2. Schedule UI thread execution to invalidate views and force immediate redraw
         Runnable action = new Runnable() {
             @Override
             public void run() {
@@ -1330,7 +1363,7 @@ public class XposedInit implements IXposedHookLoadPackage {
         } else {
             Handler h = getMainHandler();
             if (h != null) {
-                h.post(action);
+                h.postAtFrontOfQueue(action);
             } else if (sNsslView != null) {
                 sNsslView.post(action);
             }
