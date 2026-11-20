@@ -3,6 +3,7 @@ package com.nothing.blurshortcuts;
 import android.app.Application;
 import android.content.Context;
 import android.content.res.Configuration;
+import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Matrix;
@@ -91,6 +92,8 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static final RectF sDrawRectF = new RectF();
     private static final Path sClipPath = new Path();
     private static final float[] sCornerRadii = new float[8];
+    private static final Matrix sShortcutMatrix = new Matrix();
+    private static final float[] sShortcutMatrixValues = new float[9];
 
     // Pre-reflected fast fields & methods for 120 FPS notification rendering
     private static volatile boolean sNotificationBlursCleared = false;
@@ -108,12 +111,18 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static Field sBackgroundNormalField = null;
     private static Field sBackgroundDimmedField = null;
     private static Field sShowNoBackgroundField = null;
+    private static Field sTintColorField = null;
+    private static Field sBackgroundField = null;
+
     private static Method sIsShowNoBackgroundMethod = null;
     private static Method sGetActualHeightMethod = null;
     private static Method sCreateBackgroundBlurDrawableMethod = null;
     private static Method sSetBlurRadiusMethod = null;
     private static Method sSetCornerRadiusMethod = null;
     private static Method sSetCornerRadiusSingleMethod = null;
+    private static Method sGetNormalColorMethod = null;
+    private static Method sGetViewRootImplMethod = null;
+    private static Method sGetFlagsMethod = null;
 
     private static Method sIsPinnedMethod = null;
     private static Method sIsColorizedMethod = null;
@@ -122,6 +131,24 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     private static Object sLucentColorUtilsInstance = null;
     private static Method sGetLucentColorMethod = null;
+
+    // Fast dynamic frosted color cache (invalidated on theme changes)
+    private static volatile int sCachedFrostedColorDark = 0;
+    private static volatile int sCachedFrostedColorLight = 0;
+    private static volatile int sLastColorCacheUiMode = -1;
+
+    // Cached Volume Dialog resource IDs for zero-overhead styling
+    private static int sIdExpandContainer = -1;
+    private static int sIdVolumeBg = -1;
+    private static int sIdRingerBg = -1;
+    private static int sIdCaptions = -1;
+    private static int sIdA11y = -1;
+    private static int sIdAssistant = -1;
+
+    // Cached Compose native canvas reflection
+    private static Method sComposeGetInternalCanvasMethod = null;
+    private static Field sComposeInternalCanvasField = null;
+    private static volatile boolean sComposeCanvasLookupDone = false;
 
     private static final Paint glassTintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint glassBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -250,8 +277,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         StackTraceElement[] st = Thread.currentThread().getStackTrace();
-                        for (StackTraceElement ste : st) {
-                            if (ste.getClassName().contains("ShortcutElementProvider")) {
+                        int maxCheck = Math.min(st.length, 12);
+                        for (int i = 0; i < maxCheck; i++) {
+                            if (st[i].getClassName().contains("ShortcutElementProvider")) {
                                 param.setResult(param.args[0]);
                                 return;
                             }
@@ -369,12 +397,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                                     float cx = width / 2.0f;
                                     float cy = height / 2.0f;
 
-                                    Matrix matrix = new Matrix();
-                                    nativeCanvas.getMatrix(matrix);
-                                    float[] matrixValues = new float[9];
-                                    matrix.getValues(matrixValues);
-                                    float screenX = matrixValues[Matrix.MTRANS_X];
-                                    float screenY = matrixValues[Matrix.MTRANS_Y];
+                                    nativeCanvas.getMatrix(sShortcutMatrix);
+                                    sShortcutMatrix.getValues(sShortcutMatrixValues);
+                                    float screenX = sShortcutMatrixValues[Matrix.MTRANS_X];
+                                    float screenY = sShortcutMatrixValues[Matrix.MTRANS_Y];
 
                                     Rect clip = nativeCanvas.getClipBounds();
                                     if (screenX == 0f && clip != null && clip.left > 0) {
@@ -684,6 +710,10 @@ public class XposedInit implements IXposedHookLoadPackage {
             for (String clsName : sysUiStateClassNames) {
                 try {
                     Class<?> targetCls = cl.loadClass(clsName);
+                    try {
+                        sGetFlagsMethod = targetCls.getMethod("getFlags");
+                        sGetFlagsMethod.setAccessible(true);
+                    } catch (Throwable ignored) {}
                     XposedBridge.hookAllConstructors(targetCls, new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
@@ -710,7 +740,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                             sSysUiState = param.thisObject;
                             try {
-                                long flags = (Long) XposedHelpers.callMethod(param.thisObject, "getFlags");
+                                long flags = (sGetFlagsMethod != null) ? (Long) sGetFlagsMethod.invoke(param.thisObject) : (Long) XposedHelpers.callMethod(param.thisObject, "getFlags");
                                 boolean bouncer = (flags & 8L) != 0;
                                 if (bouncer != sBouncerShowing) {
                                     Log.e(TAG, "SysUiState.commitUpdate bouncer=" + bouncer);
@@ -1187,6 +1217,7 @@ public class XposedInit implements IXposedHookLoadPackage {
             try { sGetBottomCornerRadiusMethod = notifRowClass.getMethod("getBottomCornerRadius"); sGetBottomCornerRadiusMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sGetActualHeightMethod = notifRowClass.getMethod("getActualHeight"); sGetActualHeightMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sIsShowNoBackgroundMethod = notifRowClass.getMethod("isShowNoBackground"); sIsShowNoBackgroundMethod.setAccessible(true); } catch (Throwable ignored) {}
+            try { sGetNormalColorMethod = notifRowClass.getMethod("getNormalColor"); sGetNormalColorMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sShowNoBackgroundField = notifRowClass.getDeclaredField("mShowNoBackground"); sShowNoBackgroundField.setAccessible(true); } catch (Throwable ignored) {}
             try { sBackgroundNormalField = notifRowClass.getDeclaredField("mBackgroundNormal"); sBackgroundNormalField.setAccessible(true); } catch (Throwable ignored) {}
             try { sBackgroundDimmedField = notifRowClass.getDeclaredField("mBackgroundDimmed"); sBackgroundDimmedField.setAccessible(true); } catch (Throwable ignored) {}
@@ -1197,6 +1228,9 @@ public class XposedInit implements IXposedHookLoadPackage {
             try { sClipTopAmountField = notifBgClass.getDeclaredField("mClipTopAmount"); sClipTopAmountField.setAccessible(true); } catch (Throwable ignored) {}
             try { sClipBottomAmountField = notifBgClass.getDeclaredField("mClipBottomAmount"); sClipBottomAmountField.setAccessible(true); } catch (Throwable ignored) {}
             try { sBackgroundBlurDrawableField = notifBgClass.getDeclaredField("mBackgroundBlurDrawable"); sBackgroundBlurDrawableField.setAccessible(true); } catch (Throwable ignored) {}
+            try { sTintColorField = notifBgClass.getDeclaredField("mTintColor"); sTintColorField.setAccessible(true); } catch (Throwable ignored) {}
+            try { sBackgroundField = notifBgClass.getDeclaredField("mBackground"); sBackgroundField.setAccessible(true); } catch (Throwable ignored) {}
+            try { sGetViewRootImplMethod = View.class.getMethod("getViewRootImpl"); sGetViewRootImplMethod.setAccessible(true); } catch (Throwable ignored) {}
 
             try {
                 Class<?> bbdCls = cl.loadClass("com.android.internal.graphics.drawable.BackgroundBlurDrawable");
@@ -1288,7 +1322,7 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     if (sSysUiState != null) {
                         try {
-                            long flags = (Long) XposedHelpers.callMethod(sSysUiState, "getFlags");
+                            long flags = (sGetFlagsMethod != null) ? (Long) sGetFlagsMethod.invoke(sSysUiState) : (Long) XposedHelpers.callMethod(sSysUiState, "getFlags");
                             boolean bouncer = (flags & 8L) != 0;
                             if (bouncer != sBouncerShowing) {
                                 onBouncerShowingChanged(bouncer, "notifDrawHook.liveCheck");
@@ -1471,7 +1505,12 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                         if (blurDrawable == null) {
                             try {
-                                Object vri = XposedHelpers.callMethod(bgView, "getViewRootImpl");
+                                Object vri = null;
+                                if (sGetViewRootImplMethod != null) {
+                                    try { vri = sGetViewRootImplMethod.invoke(bgView); } catch (Throwable ignored) {}
+                                } else {
+                                    try { vri = XposedHelpers.callMethod(bgView, "getViewRootImpl"); } catch (Throwable ignored) {}
+                                }
                                 if (vri != null) {
                                     if (sCreateBackgroundBlurDrawableMethod != null) {
                                         blurDrawable = sCreateBackgroundBlurDrawableMethod.invoke(vri);
@@ -1527,18 +1566,22 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                         int defaultBgColor = 0;
                         if (parent != null) {
-                            try {
-                                defaultBgColor = (Integer) XposedHelpers.callMethod(parent, "getNormalColor");
-                            } catch (Throwable ignored) {}
+                            if (sGetNormalColorMethod != null) {
+                                try { defaultBgColor = (Integer) sGetNormalColorMethod.invoke(parent); } catch (Throwable ignored) {}
+                            } else {
+                                try { defaultBgColor = (Integer) XposedHelpers.callMethod(parent, "getNormalColor"); } catch (Throwable ignored) {}
+                            }
                         }
                         if (defaultBgColor == 0 || (defaultBgColor & 0xFF000000) == 0) {
                             defaultBgColor = isDark ? 0xFF202020 : 0xFFFCFCFC;
                         }
 
                         int tint = 0;
-                        try {
-                            tint = (Integer) XposedHelpers.getObjectField(bgView, "mTintColor");
-                        } catch (Throwable ignored) {}
+                        if (sTintColorField != null) {
+                            try { tint = sTintColorField.getInt(bgView); } catch (Throwable ignored) {}
+                        } else {
+                            try { tint = (Integer) XposedHelpers.getObjectField(bgView, "mTintColor"); } catch (Throwable ignored) {}
+                        }
 
                         int solidColor = (tint != 0 && (tint & 0xFF000000) != 0) ? tint : defaultBgColor;
                         solidBgPaint.setColor(solidColor);
@@ -1547,7 +1590,12 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     // Ripple effect for touch feedback on all notification cards
                     try {
-                        Object bgObj = XposedHelpers.getObjectField(bgView, "mBackground");
+                        Object bgObj = null;
+                        if (sBackgroundField != null) {
+                            bgObj = sBackgroundField.get(bgView);
+                        } else {
+                            bgObj = XposedHelpers.getObjectField(bgView, "mBackground");
+                        }
                         if (bgObj instanceof android.graphics.drawable.LayerDrawable) {
                             android.graphics.drawable.LayerDrawable ld = (android.graphics.drawable.LayerDrawable) bgObj;
                             for (int i = 0; i < ld.getNumberOfLayers(); i++) {
@@ -1579,8 +1627,19 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
                 }
             };
+            XC_MethodHook unregisterBgViewHook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    if (param.thisObject instanceof View) {
+                        View v = (View) param.thisObject;
+                        cleanupBlur(v);
+                        sAllNotificationBackgrounds.remove(v);
+                    }
+                }
+            };
             try { XposedBridge.hookAllConstructors(notifBgClass, registerBgViewHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifBgClass, "onAttachedToWindow", registerBgViewHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifBgClass, "onDetachedFromWindow", unregisterBgViewHook); } catch (Throwable ignored) {}
 
             XposedBridge.hookAllMethods(notifBgClass, "onDraw", notifDrawHook);
             try {
@@ -1588,6 +1647,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                 if (notifShelfBgClass != null && notifShelfBgClass != notifBgClass) {
                     try { XposedBridge.hookAllConstructors(notifShelfBgClass, registerBgViewHook); } catch (Throwable ignored) {}
                     try { XposedBridge.hookAllMethods(notifShelfBgClass, "onAttachedToWindow", registerBgViewHook); } catch (Throwable ignored) {}
+                    try { XposedBridge.hookAllMethods(notifShelfBgClass, "onDetachedFromWindow", unregisterBgViewHook); } catch (Throwable ignored) {}
                     XposedBridge.hookAllMethods(notifShelfBgClass, "onDraw", notifDrawHook);
                 }
             } catch (Throwable ignored) {}
@@ -1609,60 +1669,59 @@ public class XposedInit implements IXposedHookLoadPackage {
         int strokeColor = isDark ? 0x28FFFFFF : 0x35FFFFFF;
         int strokeWidth = Math.max(2, Math.round(1.0f * ctx.getResources().getDisplayMetrics().density));
 
-        String pkg = ctx.getPackageName();
+        if (sIdVolumeBg == -1) {
+            String pkg = ctx.getPackageName();
+            Resources res = root.getResources();
+            sIdExpandContainer = res.getIdentifier("volume_expand_bar_container", "id", pkg);
+            sIdVolumeBg = res.getIdentifier("volume_dialog_background", "id", pkg);
+            sIdRingerBg = res.getIdentifier("ringer_buttons_background", "id", pkg);
+            sIdCaptions = res.getIdentifier("odi_captions", "id", pkg);
+            sIdA11y = res.getIdentifier("accessibility_slider_container", "id", pkg);
+            sIdAssistant = res.getIdentifier("assistant_slider_container", "id", pkg);
+        }
 
         // 1. Remove solid opaque background plate from volume_expand_bar_container
-        int expandContainerId = root.getResources().getIdentifier("volume_expand_bar_container", "id", pkg);
-        if (expandContainerId != 0) {
-            View expandContainer = root.findViewById(expandContainerId);
-            if (expandContainer != null) {
-                if (expandContainer.getBackground() != null) {
-                    Log.e(TAG, "styleVolumeDialog: clearing background on volume_expand_bar_container (was " + expandContainer.getBackground().getClass().getSimpleName() + ")");
-                    expandContainer.setBackground(null);
-                }
+        if (sIdExpandContainer != 0) {
+            View expandContainer = root.findViewById(sIdExpandContainer);
+            if (expandContainer != null && expandContainer.getBackground() != null) {
+                expandContainer.setBackground(null);
             }
         }
 
         // 2. Style volume_dialog_background (the main volume capsule)
-        int bgId = root.getResources().getIdentifier("volume_dialog_background", "id", pkg);
-        if (bgId != 0) {
-            View bgView = root.findViewById(bgId);
+        if (sIdVolumeBg != 0) {
+            View bgView = root.findViewById(sIdVolumeBg);
             if (bgView != null) {
-                Log.e(TAG, "styleVolumeDialog: applying frosted glass to volume_dialog_background (isDark=" + isDark + ")");
                 applyFrostedGlassToDrawable(bgView.getBackground(), tintColor, strokeWidth, strokeColor);
             }
         }
 
         // 3. Style ringer_buttons_background (the ringer drawer capsule)
-        int ringerBgId = root.getResources().getIdentifier("ringer_buttons_background", "id", pkg);
-        if (ringerBgId != 0) {
-            View ringerBg = root.findViewById(ringerBgId);
+        if (sIdRingerBg != 0) {
+            View ringerBg = root.findViewById(sIdRingerBg);
             if (ringerBg != null) {
                 applyFrostedGlassToDrawable(ringerBg.getBackground(), tintColor, strokeWidth, strokeColor);
             }
         }
 
         // 4. Style odi_captions if present
-        int captionsId = root.getResources().getIdentifier("odi_captions", "id", pkg);
-        if (captionsId != 0) {
-            View captionsView = root.findViewById(captionsId);
+        if (sIdCaptions != 0) {
+            View captionsView = root.findViewById(sIdCaptions);
             if (captionsView != null) {
                 applyFrostedGlassToDrawable(captionsView.getBackground(), tintColor, strokeWidth, strokeColor);
             }
         }
 
         // 5. Style accessibility & assistant sliders if present
-        int a11yId = root.getResources().getIdentifier("accessibility_slider_container", "id", pkg);
-        if (a11yId != 0) {
-            View a11yView = root.findViewById(a11yId);
+        if (sIdA11y != 0) {
+            View a11yView = root.findViewById(sIdA11y);
             if (a11yView != null) {
                 applyFrostedGlassToDrawable(a11yView.getBackground(), tintColor, strokeWidth, strokeColor);
             }
         }
 
-        int assistantId = root.getResources().getIdentifier("assistant_slider_container", "id", pkg);
-        if (assistantId != 0) {
-            View assistantView = root.findViewById(assistantId);
+        if (sIdAssistant != 0) {
+            View assistantView = root.findViewById(sIdAssistant);
             if (assistantView != null) {
                 applyFrostedGlassToDrawable(assistantView.getBackground(), tintColor, strokeWidth, strokeColor);
             }
@@ -1739,13 +1798,17 @@ public class XposedInit implements IXposedHookLoadPackage {
         if (sBouncerShowing == showing) return;
         sBouncerShowing = showing;
         Log.e(TAG, "onBouncerShowingChanged: " + showing + " (" + reason + ")");
+        Handler h = getMainHandler();
         if (showing) {
+            if (h != null) {
+                h.removeCallbacks(sWakeInvalidateRunnable);
+            }
             clearAllNotificationBlurs();
             invalidateNotificationStack();
         } else if (sScreenAwake && sStatusBarState == 1) {
             invalidateNotificationStack();
-            Handler h = getMainHandler();
             if (h != null) {
+                h.removeCallbacks(sWakeInvalidateRunnable);
                 h.postDelayed(sWakeInvalidateRunnable, 50);
                 h.postDelayed(sWakeInvalidateRunnable, 150);
                 h.postDelayed(sWakeInvalidateRunnable, 300);
@@ -1806,8 +1869,13 @@ public class XposedInit implements IXposedHookLoadPackage {
             sInvalidateNotificationStackRunnable.run();
         } else {
             Handler h = getMainHandler();
-            if (h != null) h.post(sInvalidateNotificationStackRunnable);
-            else if (sNsslView != null) sNsslView.post(sInvalidateNotificationStackRunnable);
+            if (h != null) {
+                h.removeCallbacks(sInvalidateNotificationStackRunnable);
+                h.post(sInvalidateNotificationStackRunnable);
+            } else if (sNsslView != null) {
+                sNsslView.removeCallbacks(sInvalidateNotificationStackRunnable);
+                sNsslView.post(sInvalidateNotificationStackRunnable);
+            }
         }
     }
 
@@ -1853,8 +1921,10 @@ public class XposedInit implements IXposedHookLoadPackage {
         } else {
             Handler h = getMainHandler();
             if (h != null) {
+                h.removeCallbacks(sClearAllNotificationBlursRunnable);
                 h.postAtFrontOfQueue(sClearAllNotificationBlursRunnable);
             } else if (sNsslView != null) {
+                sNsslView.removeCallbacks(sClearAllNotificationBlursRunnable);
                 sNsslView.post(sClearAllNotificationBlursRunnable);
             }
         }
@@ -1865,6 +1935,10 @@ public class XposedInit implements IXposedHookLoadPackage {
         sNotificationBlursCleared = true;
         sFractionToShade = 0f;
         sLsToShadeProgress = 0f;
+        Handler h = getMainHandler();
+        if (h != null) {
+            h.removeCallbacks(sWakeInvalidateRunnable);
+        }
         clearAllNotificationBlurs();
     }
 
@@ -1873,7 +1947,7 @@ public class XposedInit implements IXposedHookLoadPackage {
         public void run() {
             if (sSysUiState != null) {
                 try {
-                    long flags = (Long) XposedHelpers.callMethod(sSysUiState, "getFlags");
+                    long flags = (sGetFlagsMethod != null) ? (Long) sGetFlagsMethod.invoke(sSysUiState) : (Long) XposedHelpers.callMethod(sSysUiState, "getFlags");
                     if ((flags & 8L) != 0) {
                         sBouncerShowing = true;
                         clearAllNotificationBlurs();
@@ -1895,7 +1969,7 @@ public class XposedInit implements IXposedHookLoadPackage {
 
         if (sSysUiState != null) {
             try {
-                long flags = (Long) XposedHelpers.callMethod(sSysUiState, "getFlags");
+                long flags = (sGetFlagsMethod != null) ? (Long) sGetFlagsMethod.invoke(sSysUiState) : (Long) XposedHelpers.callMethod(sSysUiState, "getFlags");
                 sBouncerShowing = ((flags & 8L) != 0);
             } catch (Throwable ignored) {}
         }
@@ -1909,6 +1983,7 @@ public class XposedInit implements IXposedHookLoadPackage {
 
         Handler h = getMainHandler();
         if (h != null) {
+            h.removeCallbacks(sWakeInvalidateRunnable);
             h.postDelayed(sWakeInvalidateRunnable, 50);
             h.postDelayed(sWakeInvalidateRunnable, 150);
             h.postDelayed(sWakeInvalidateRunnable, 300);
@@ -1916,13 +1991,37 @@ public class XposedInit implements IXposedHookLoadPackage {
     }
 
     private static int getFrostedBackdropColor(Context ctx, boolean isDark) {
-        if (sLucentColorUtilsInstance != null && sGetLucentColorMethod != null && ctx != null) {
+        if (ctx == null) return isDark ? 0x44000000 : 0x66FFFFFF;
+
+        int currentUiMode = ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+        if (currentUiMode != sLastColorCacheUiMode) {
+            sCachedFrostedColorDark = 0;
+            sCachedFrostedColorLight = 0;
+            sLastColorCacheUiMode = currentUiMode;
+        }
+
+        if (isDark && sCachedFrostedColorDark != 0) {
+            return sCachedFrostedColorDark;
+        } else if (!isDark && sCachedFrostedColorLight != 0) {
+            return sCachedFrostedColorLight;
+        }
+
+        int color = 0;
+        if (sLucentColorUtilsInstance != null && sGetLucentColorMethod != null) {
             try {
-                int c = (Integer) sGetLucentColorMethod.invoke(sLucentColorUtilsInstance, ctx, "container_frosted_backdrop");
-                if (c != 0) return c;
+                color = (Integer) sGetLucentColorMethod.invoke(sLucentColorUtilsInstance, ctx, "container_frosted_backdrop");
             } catch (Throwable ignored) {}
         }
-        return isDark ? 0x44000000 : 0x66FFFFFF;
+        if (color == 0) {
+            color = isDark ? 0x44000000 : 0x66FFFFFF;
+        }
+
+        if (isDark) {
+            sCachedFrostedColorDark = color;
+        } else {
+            sCachedFrostedColorLight = color;
+        }
+        return color;
     }
 
     private static void cleanupBlur(View bgView) {
@@ -1949,27 +2048,44 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     private static Canvas getNativeCanvas(Object composeCanvas) {
         if (composeCanvas == null) return null;
-        try {
-            Method m = composeCanvas.getClass().getMethod("getInternalCanvas");
-            return (Canvas) m.invoke(composeCanvas);
-        } catch (Throwable ignored) {}
-        try {
-            Field f = composeCanvas.getClass().getDeclaredField("_internalCanvas");
-            f.setAccessible(true);
-            return (Canvas) f.get(composeCanvas);
-        } catch (Throwable ignored) {}
-        try {
-            Field f = composeCanvas.getClass().getDeclaredField("internalCanvas");
-            f.setAccessible(true);
-            return (Canvas) f.get(composeCanvas);
-        } catch (Throwable ignored) {}
-        for (Field f : composeCanvas.getClass().getDeclaredFields()) {
-            if (Canvas.class.isAssignableFrom(f.getType())) {
-                try {
-                    f.setAccessible(true);
-                    Canvas c = (Canvas) f.get(composeCanvas);
-                    if (c != null) return c;
-                } catch (Throwable ignored) {}
+        if (sComposeGetInternalCanvasMethod != null) {
+            try {
+                return (Canvas) sComposeGetInternalCanvasMethod.invoke(composeCanvas);
+            } catch (Throwable ignored) {}
+        }
+        if (sComposeInternalCanvasField != null) {
+            try {
+                return (Canvas) sComposeInternalCanvasField.get(composeCanvas);
+            } catch (Throwable ignored) {}
+        }
+        if (!sComposeCanvasLookupDone) {
+            sComposeCanvasLookupDone = true;
+            try {
+                Method m = composeCanvas.getClass().getMethod("getInternalCanvas");
+                m.setAccessible(true);
+                sComposeGetInternalCanvasMethod = m;
+                return (Canvas) m.invoke(composeCanvas);
+            } catch (Throwable ignored) {}
+            try {
+                Field f = composeCanvas.getClass().getDeclaredField("_internalCanvas");
+                f.setAccessible(true);
+                sComposeInternalCanvasField = f;
+                return (Canvas) f.get(composeCanvas);
+            } catch (Throwable ignored) {}
+            try {
+                Field f = composeCanvas.getClass().getDeclaredField("internalCanvas");
+                f.setAccessible(true);
+                sComposeInternalCanvasField = f;
+                return (Canvas) f.get(composeCanvas);
+            } catch (Throwable ignored) {}
+            for (Field f : composeCanvas.getClass().getDeclaredFields()) {
+                if (Canvas.class.isAssignableFrom(f.getType())) {
+                    try {
+                        f.setAccessible(true);
+                        sComposeInternalCanvasField = f;
+                        return (Canvas) f.get(composeCanvas);
+                    } catch (Throwable ignored) {}
+                }
             }
         }
         return null;
