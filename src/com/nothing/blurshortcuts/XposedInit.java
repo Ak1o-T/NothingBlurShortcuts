@@ -2,22 +2,22 @@ package com.nothing.blurshortcuts;
 
 import android.app.Application;
 import android.content.Context;
-import android.content.res.Configuration;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.Matrix;
 import android.graphics.Paint;
+import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
 import android.util.Log;
 import android.view.View;
-import android.widget.ImageView;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
-import java.util.Collections;
+import java.util.Arrays;
 import java.util.Map;
-import java.util.Set;
-import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -29,9 +29,6 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     private static final String TAG = "NothingBlurShortcuts";
 
-    private static Class<?> providerClass;
-    private static Object providerInstance;
-
     private static Class<?> drawableClass;
     private static Method setClipRadiusMethod;
     private static Method updateOffsetMethod;
@@ -39,21 +36,23 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static Method completeTransitionNowMethod;
     private static Method onThemeChangedMethod;
 
-    private static final Set<View> shortcutButtons = Collections.newSetFromMap(new WeakHashMap<>());
-    private static final Map<View, FrostedShortcutBackdrop> backdropMap = new WeakHashMap<>();
-    private static final Set<Class<?>> hookedClasses = Collections.newSetFromMap(new WeakHashMap<>());
-    private static boolean systemUiInitialized = false;
+    private static Class<?> providerClass;
+    private static Object backdropProvider;
 
-    private static final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    // Cache drawables per shortcut slot
+    private static Drawable leftDrawable;
+    private static Drawable rightDrawable;
+
     private static final Paint glassTintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private static final Paint pressedHighlightPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private static final RectF tempRectF = new RectF();
+    private static final Paint glassBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     static {
-        borderPaint.setStyle(Paint.Style.STROKE);
-        borderPaint.setStrokeWidth(1.5f);
         glassTintPaint.setStyle(Paint.Style.FILL);
-        pressedHighlightPaint.setStyle(Paint.Style.FILL);
+        glassTintPaint.setColor(0x38FFFFFF); // Authentic Nothing OS lockscreen widget frosted glass tint
+
+        glassBorderPaint.setStyle(Paint.Style.STROKE);
+        glassBorderPaint.setStrokeWidth(2.0f); // 2px crisp specular border
+        glassBorderPaint.setColor(0x45FFFFFF); // Specular outline rim
     }
 
     @Override
@@ -62,17 +61,15 @@ public class XposedInit implements IXposedHookLoadPackage {
             return;
         }
 
-        Log.i(TAG, "NothingBlurShortcuts handleLoadPackage in com.android.systemui");
+        Log.e(TAG, "NothingBlurShortcuts handleLoadPackage in com.android.systemui");
 
-        // Hook Application.onCreate to ensure complete SystemUI multidex classpath is loaded
         try {
             XposedBridge.hookAllMethods(Application.class, "onCreate", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    if (systemUiInitialized) return;
                     Application app = (Application) param.thisObject;
                     if (app != null && "com.android.systemui".equals(app.getPackageName())) {
-                        systemUiInitialized = true;
+                        Log.e(TAG, "Application.onCreate called! Initializing with app ClassLoader.");
                         initSystemUI(app.getClassLoader());
                     }
                 }
@@ -87,416 +84,285 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static synchronized void initSystemUI(ClassLoader cl) {
         if (cl == null) return;
 
-        // 1. Resolve Nothing OS Frosted Backdrop classes
-        if (providerClass == null) {
-            try {
-                providerClass = XposedHelpers.findClass("com.nothing.cardhost.frosted.FrostedBackdropProvider", cl);
-            } catch (Throwable t) {
-                try {
-                    providerClass = XposedHelpers.findClass("com.nothing.systemui.widget.NTKeyguardFrostedBackdrop", cl);
-                } catch (Throwable ignored) {}
-            }
-        }
-
-        if (drawableClass == null) {
-            try {
-                drawableClass = XposedHelpers.findClass("com.nothing.commBase.frosted.stdview.FrostedBackdropDrawable", cl);
-                setClipRadiusMethod = drawableClass.getMethod("setClipRadius", float.class);
-                updateOffsetMethod = drawableClass.getMethod("updateOffset", float.class, float.class);
-                completeTransitionNowMethod = drawableClass.getMethod("completeTransitionNow");
-                onThemeChangedMethod = drawableClass.getMethod("onThemeChanged");
-                try {
-                    setAnimateEntranceMethod = drawableClass.getMethod("setAnimateEntrance", boolean.class);
-                } catch (Throwable ignored) {}
-                Log.i(TAG, "Successfully resolved FrostedBackdropDrawable methods!");
-            } catch (Throwable t) {
-                Log.w(TAG, "FrostedBackdropDrawable lookup pending: " + t.getMessage());
-            }
-        }
-
-        // 2. Hook KeyguardBottomAreaView lifecycle
+        // 1. Enable SystemUI Lockscreen Blur Feature Flags
         try {
-            Class<?> bottomAreaClass = XposedHelpers.findClass("com.android.systemui.statusbar.phone.KeyguardBottomAreaView", cl);
+            Class<?> flagsClass = cl.loadClass("com.android.systemui.Flags");
 
-            XposedBridge.hookAllMethods(bottomAreaClass, "onFinishInflate", new XC_MethodHook() {
+            XposedBridge.hookAllMethods(flagsClass, "enableLockscreenBlur", new XC_MethodHook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    setupShortcuts((View) param.thisObject);
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    param.setResult(true);
                 }
             });
 
-            XposedBridge.hookAllMethods(bottomAreaClass, "onAttachedToWindow", new XC_MethodHook() {
+            XposedBridge.hookAllMethods(flagsClass, "blurOnMoreSurfaces", new XC_MethodHook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    setupShortcuts((View) param.thisObject);
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    param.setResult(true);
                 }
             });
 
-            XposedBridge.hookAllMethods(bottomAreaClass, "onLayout", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    setupShortcuts((View) param.thisObject);
-                }
-            });
-            Log.i(TAG, "Successfully hooked KeyguardBottomAreaView!");
+            Log.e(TAG, "Successfully enabled Flags.enableLockscreenBlur & blurOnMoreSurfaces!");
         } catch (Throwable t) {
-            Log.w(TAG, "KeyguardBottomAreaView lookup pending: " + t.getMessage());
+            Log.e(TAG, "Flags hook check: " + t.getMessage());
         }
 
-        // 3. Hook KeyguardQuickAffordanceViewBinder to completely strip stock opaque background & tint
+        // 2. Discover FrostedBackdropDrawable and FrostedBackdropProvider
         try {
-            Class<?> binderClass = XposedHelpers.findClass("com.android.systemui.keyguard.ui.binder.KeyguardQuickAffordanceViewBinder", cl);
+            providerClass = cl.loadClass("com.nothing.cardhost.frosted.FrostedBackdropProvider");
+            Object companion = XposedHelpers.getStaticObjectField(providerClass, "Companion");
+            backdropProvider = XposedHelpers.callMethod(companion, "getInstance");
+            Log.e(TAG, "FrostedBackdropProvider instance: " + backdropProvider);
 
-            XposedBridge.hookAllMethods(binderClass, "bind", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    if (param.args != null && param.args.length > 0 && param.args[0] instanceof View) {
-                        registerShortcutButton((View) param.args[0]);
-                    }
-                }
-            });
-
-            // Suppress stock opaque tinting
-            XposedBridge.hookAllMethods(binderClass, "updateBackgroundTint", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    param.setResult(null);
-                }
-            });
-
-            // Suppress stock layer background logic
-            XposedBridge.hookAllMethods(binderClass, "updateBackground", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    param.setResult(null);
-                }
-            });
-
-            Log.i(TAG, "Successfully hooked KeyguardQuickAffordanceViewBinder (opaque tint suppressed)!");
+            drawableClass = cl.loadClass("com.nothing.commBase.frosted.stdview.FrostedBackdropDrawable");
+            for (Method m : drawableClass.getDeclaredMethods()) {
+                String name = m.getName();
+                if (name.equals("setClipRadius")) setClipRadiusMethod = m;
+                else if (name.equals("updateOffset")) updateOffsetMethod = m;
+                else if (name.equals("setAnimateEntrance")) setAnimateEntranceMethod = m;
+                else if (name.equals("completeTransitionNow")) completeTransitionNowMethod = m;
+                else if (name.equals("onThemeChanged")) onThemeChangedMethod = m;
+            }
+            if (setClipRadiusMethod != null) setClipRadiusMethod.setAccessible(true);
+            if (updateOffsetMethod != null) updateOffsetMethod.setAccessible(true);
+            if (setAnimateEntranceMethod != null) setAnimateEntranceMethod.setAccessible(true);
+            if (completeTransitionNowMethod != null) completeTransitionNowMethod.setAccessible(true);
+            if (onThemeChangedMethod != null) onThemeChangedMethod.setAccessible(true);
+            Log.e(TAG, "FrostedBackdropDrawable methods reflected successfully!");
         } catch (Throwable t) {
-            Log.w(TAG, "KeyguardQuickAffordanceViewBinder lookup pending: " + t.getMessage());
+            Log.e(TAG, "Frosted classes check: " + t.getMessage());
         }
 
-        // 4. Hook ImageView.onDraw and View.draw to guarantee complete transparency of the button plate
+        // 3. Hook Jetpack Compose Lockscreen Shortcuts: ShortcutElementProvider
         try {
-            // Hook draw() to purge any stock background right before drawBackground()
-            XposedBridge.hookAllMethods(ImageView.class, "draw", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    if (shortcutButtons.isEmpty()) return;
-                    View view = (View) param.thisObject;
-                    if (!isShortcutButton(view)) return;
+            Class<?> shortcutProviderClass = cl.loadClass("com.android.systemui.keyguard.ui.composable.elements.ShortcutElementProvider");
+            ClassLoader composeCl = shortcutProviderClass.getClassLoader();
 
-                    if (view.getBackground() != null) {
-                        view.setBackground(null);
+            // Strip solid background plate from BackgroundKt
+            try {
+                Class<?> bgKtClass = composeCl.loadClass("androidx.compose.foundation.BackgroundKt");
+                XC_MethodHook stripBgHook = new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        StackTraceElement[] st = Thread.currentThread().getStackTrace();
+                        for (StackTraceElement ste : st) {
+                            if (ste.getClassName().contains("ShortcutElementProvider")) {
+                                Log.e(TAG, "STRIPPED SOLID PLATE in BackgroundKt! Returning unbacked modifier.");
+                                param.setResult(param.args[0]);
+                                return;
+                            }
+                        }
+                    }
+                };
+
+                for (Method m : bgKtClass.getDeclaredMethods()) {
+                    if (m.getName().startsWith("background")) {
+                        try {
+                            XposedBridge.hookMethod(m, stripBgHook);
+                            Log.e(TAG, "Hooked BackgroundKt." + m.getName() + " to strip solid plate!");
+                        } catch (Throwable t) {
+                            Log.e(TAG, "Failed hooking BackgroundKt." + m.getName() + ": " + t);
+                        }
                     }
                 }
-            });
+            } catch (Throwable t) {
+                Log.e(TAG, "BackgroundKt hook error: " + t);
+            }
 
-            // Hook onDraw() to draw the authentic transparent frosted glass backdrop
-            XposedBridge.hookAllMethods(ImageView.class, "onDraw", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    if (shortcutButtons.isEmpty()) return;
-                    View view = (View) param.thisObject;
-                    if (!isShortcutButton(view)) return;
+            // Hook shortcutBackground directly
+            for (Method m : shortcutProviderClass.getDeclaredMethods()) {
+                if (m.getName().equals("shortcutBackground")) {
+                    try {
+                        m.setAccessible(true);
+                        XposedBridge.hookMethod(m, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                Log.e(TAG, "shortcutBackground BEFORE: incoming modifier = " + param.args[0]);
+                            }
 
-                    Canvas canvas = (Canvas) param.args[0];
-                    if (canvas != null) {
-                        renderFrostedBackdrop(view, canvas);
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                                Log.e(TAG, "shortcutBackground AFTER: replacing with transparent modifier = " + param.args[0]);
+                                param.setResult(param.args[0]);
+                            }
+                        });
+                        Log.e(TAG, "Successfully hooked shortcutBackground method!");
+                    } catch (Throwable t) {
+                        Log.e(TAG, "Failed hooking shortcutBackground: " + t);
                     }
                 }
-            });
+            }
 
-            // Prevent KeyguardQuickAffordanceViewBinder from re-applying keyguard_bottom_affordance_bg
-            XposedBridge.hookAllMethods(ImageView.class, "setBackgroundResource", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    View view = (View) param.thisObject;
-                    if (isShortcutButton(view)) {
-                        param.setResult(null); // Block stock background resource
+            // Force ONLY boolean isBlurCurrentlySupported state lambdas to return true
+            for (Method m : shortcutProviderClass.getDeclaredMethods()) {
+                if (m.getName().contains("lambda") && m.getReturnType() == boolean.class &&
+                    (m.getName().contains("shortcutBackground") || m.getName().contains("drawBlurBehind"))) {
+                    try {
+                        XposedBridge.hookMethod(m, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                param.setResult(true);
+                            }
+                        });
+                        Log.e(TAG, "Hooked blur state boolean lambda: " + m.getName());
+                    } catch (Throwable t) {
+                        Log.e(TAG, "Failed hooking lambda " + m.getName() + ": " + t.getMessage());
                     }
                 }
-            });
+            }
 
-            XposedBridge.hookAllMethods(ImageView.class, "setBackgroundDrawable", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    View view = (View) param.thisObject;
-                    if (isShortcutButton(view)) {
-                        param.setResult(null); // Block stock background drawable
+            // Hook drawBlurBehind$lambda$49$lambda$48 (Compose background draw callback)
+            for (Method m : shortcutProviderClass.getDeclaredMethods()) {
+                if (m.getName().contains("lambda$49$lambda$48")) {
+                    try {
+                        XposedBridge.hookMethod(m, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                try {
+                                    Object drawScope = param.args[5];
+                                    Object viewModel = param.args[3];
+                                    
+                                    // Extract native Canvas from Compose DrawScope
+                                    Object drawContext = XposedHelpers.callMethod(drawScope, "getDrawContext");
+                                    Object composeCanvas = XposedHelpers.callMethod(drawContext, "getCanvas");
+                                    Canvas nativeCanvas = getNativeCanvas(composeCanvas);
+
+                                    if (nativeCanvas == null) {
+                                        param.setResult(null); // Cancel original method anyway
+                                        return;
+                                    }
+
+                                    long sizeBits = (Long) XposedHelpers.callMethod(drawScope, "getSize-NH-jbRc");
+                                    float width = Float.intBitsToFloat((int) (sizeBits >> 32));
+                                    float height = Float.intBitsToFloat((int) (sizeBits & 0xFFFFFFFFL));
+                                    float radius = Math.min(width, height) / 2.0f;
+                                    float cx = width / 2.0f;
+                                    float cy = height / 2.0f;
+
+                                    Matrix matrix = new Matrix();
+                                    nativeCanvas.getMatrix(matrix);
+                                    float[] matrixValues = new float[9];
+                                    matrix.getValues(matrixValues);
+                                    float screenX = matrixValues[Matrix.MTRANS_X];
+                                    float screenY = matrixValues[Matrix.MTRANS_Y];
+
+                                    Rect clip = nativeCanvas.getClipBounds();
+                                    if (screenX == 0f && clip != null && clip.left > 0) {
+                                        screenX = clip.left;
+                                        screenY = clip.top;
+                                    }
+
+                                    boolean isLeftSlot = true;
+                                    String vmStr = String.valueOf(viewModel);
+                                    if (screenX > 500f || vmStr.contains("bottom_end") || vmStr.contains("end") || vmStr.contains("camera") || vmStr.contains("qr")) {
+                                        isLeftSlot = false;
+                                    }
+
+                                    if (screenX <= 0f) {
+                                        screenX = isLeftSlot ? 100f : 980f;
+                                        screenY = 2550f;
+                                    }
+
+                                    // Refresh provider if needed
+                                    if (backdropProvider == null && providerClass != null) {
+                                        try {
+                                            Object companion = XposedHelpers.getStaticObjectField(providerClass, "Companion");
+                                            backdropProvider = XposedHelpers.callMethod(companion, "getInstance");
+                                        } catch (Throwable ignored) {}
+                                    }
+
+                                    // Get or create FrostedBackdropDrawable per slot
+                                    Drawable frosted = isLeftSlot ? leftDrawable : rightDrawable;
+                                    if (frosted == null && backdropProvider != null && drawableClass != null) {
+                                        try {
+                                            Context ctx = (Context) XposedHelpers.callStaticMethod(
+                                                XposedHelpers.findClass("android.app.ActivityThread", null),
+                                                "currentApplication"
+                                            );
+                                            frosted = (Drawable) XposedHelpers.newInstance(drawableClass, ctx, backdropProvider);
+                                            if (frosted != null) {
+                                                frosted.setCallback(null);
+                                                if (setAnimateEntranceMethod != null) {
+                                                    setAnimateEntranceMethod.invoke(frosted, false);
+                                                }
+                                                if (completeTransitionNowMethod != null) {
+                                                    completeTransitionNowMethod.invoke(frosted);
+                                                }
+                                                if (isLeftSlot) {
+                                                    leftDrawable = frosted;
+                                                } else {
+                                                    rightDrawable = frosted;
+                                                }
+                                                Log.e(TAG, "Created FrostedBackdropDrawable for slot: " + (isLeftSlot ? "LEFT" : "RIGHT"));
+                                            }
+                                        } catch (Throwable t) {
+                                            Log.e(TAG, "Failed creating FrostedBackdropDrawable: " + t);
+                                        }
+                                    }
+
+                                    // 1. Render authentic blurred wallpaper backdrop
+                                    if (frosted != null) {
+                                        if (setClipRadiusMethod != null) {
+                                            setClipRadiusMethod.invoke(frosted, radius);
+                                        }
+                                        if (updateOffsetMethod != null) {
+                                            updateOffsetMethod.invoke(frosted, screenX, screenY);
+                                        }
+                                        frosted.setBounds(0, 0, (int) width, (int) height);
+                                        frosted.draw(nativeCanvas);
+                                    }
+
+                                    // 2. Render Widget-style frosted glass plate overlay (translucent fill + specular rim)
+                                    nativeCanvas.drawCircle(cx, cy, radius, glassTintPaint);
+                                    nativeCanvas.drawCircle(cx, cy, radius - 1.0f, glassBorderPaint);
+
+                                } catch (Throwable t) {
+                                    Log.e(TAG, "Error in drawBlurBehind lambda: " + t, t);
+                                } finally {
+                                    // CANCEL the original method so AOSP's BackgroundBlurDrawable
+                                    // does NOT draw any solid opaque plate over our glass!
+                                    param.setResult(null);
+                                }
+                            }
+                        });
+                        Log.e(TAG, "Successfully hooked drawBehind draw lambda: " + m.getName());
+                    } catch (Throwable t) {
+                        Log.e(TAG, "Failed hooking drawBehind draw lambda: " + t);
                     }
                 }
-            });
+            }
 
-            Log.i(TAG, "Successfully hooked ImageView draw/onDraw/setBackground for shortcuts!");
+            Log.e(TAG, "Successfully hooked Compose ShortcutElementProvider!");
         } catch (Throwable t) {
-            Log.e(TAG, "Failed to hook ImageView methods: " + t.getMessage(), t);
+            Log.e(TAG, "ShortcutElementProvider hook check: " + t.getMessage());
         }
     }
 
-    private static void setupShortcuts(View bottomArea) {
-        if (bottomArea == null) return;
-        Context ctx = bottomArea.getContext();
-        int startId = ctx.getResources().getIdentifier("start_button", "id", "com.android.systemui");
-        int endId = ctx.getResources().getIdentifier("end_button", "id", "com.android.systemui");
-
-        if (startId != 0) {
-            View startBtn = bottomArea.findViewById(startId);
-            if (startBtn != null) {
-                registerShortcutButton(startBtn);
-            }
-        }
-        if (endId != 0) {
-            View endBtn = bottomArea.findViewById(endId);
-            if (endBtn != null) {
-                registerShortcutButton(endBtn);
-            }
-        }
-    }
-
-    private static void registerShortcutButton(View button) {
-        if (button == null) return;
-        shortcutButtons.add(button);
-
-        // Completely remove stock opaque background
-        button.setBackground(null);
-        button.setBackgroundTintList(null);
-
-        ensureClassHooked(button.getClass());
-    }
-
-    private static synchronized void ensureClassHooked(Class<?> clazz) {
-        if (clazz == null || clazz == ImageView.class || clazz == View.class) return;
-        if (hookedClasses.add(clazz)) {
-            try {
-                XposedBridge.hookAllMethods(clazz, "draw", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        View view = (View) param.thisObject;
-                        if (!isShortcutButton(view)) return;
-                        if (view.getBackground() != null) {
-                            view.setBackground(null);
-                        }
-                    }
-                });
-
-                XposedBridge.hookAllMethods(clazz, "onDraw", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        View view = (View) param.thisObject;
-                        if (!isShortcutButton(view)) return;
-                        Canvas canvas = (Canvas) param.args[0];
-                        if (canvas != null) {
-                            renderFrostedBackdrop(view, canvas);
-                        }
-                    }
-                });
-
-                XposedBridge.hookAllMethods(clazz, "setBackgroundResource", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        View view = (View) param.thisObject;
-                        if (isShortcutButton(view)) {
-                            param.setResult(null);
-                        }
-                    }
-                });
-
-                XposedBridge.hookAllMethods(clazz, "setBackgroundDrawable", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        View view = (View) param.thisObject;
-                        if (isShortcutButton(view)) {
-                            param.setResult(null);
-                        }
-                    }
-                });
-
-                Log.i(TAG, "Dynamically hooked methods for subclass: " + clazz.getName());
-            } catch (Throwable t) {
-                Log.w(TAG, "Subclass hook skipped: " + t.getMessage());
-            }
-        }
-    }
-
-    private static boolean isShortcutButton(View view) {
-        if (shortcutButtons.contains(view)) {
-            return true;
-        }
-        Context ctx = view.getContext();
-        int id = view.getId();
-        if (id != View.NO_ID && id != 0) {
-            int startId = ctx.getResources().getIdentifier("start_button", "id", "com.android.systemui");
-            int endId = ctx.getResources().getIdentifier("end_button", "id", "com.android.systemui");
-            if (id == startId || id == endId) {
-                shortcutButtons.add(view);
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static void renderFrostedBackdrop(View view, Canvas canvas) {
-        int w = view.getWidth();
-        int h = view.getHeight();
-        if (w <= 0 || h <= 0) {
-            return;
-        }
-
-        // Ensure stock background is not drawn
-        if (view.getBackground() != null) {
-            view.setBackground(null);
-        }
-
-        Context context = view.getContext();
-        int uiMode = context.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
-        boolean isDark = (uiMode == Configuration.UI_MODE_NIGHT_YES);
-        float radius = Math.min(w, h) / 2.0f;
-
-        Object provider = getFrostedProvider(context, view.getClass().getClassLoader());
-
-        FrostedShortcutBackdrop backdrop = backdropMap.get(view);
-        if (backdrop == null && provider != null && drawableClass != null) {
-            try {
-                Drawable frostedDrawable = (Drawable) XposedHelpers.newInstance(drawableClass, context, provider);
-                if (frostedDrawable != null) {
-                    frostedDrawable.setCallback(null);
-                    if (setAnimateEntranceMethod != null) {
-                        setAnimateEntranceMethod.invoke(frostedDrawable, false);
-                    }
-                    if (completeTransitionNowMethod != null) {
-                        completeTransitionNowMethod.invoke(frostedDrawable);
-                    }
-                    backdrop = new FrostedShortcutBackdrop(frostedDrawable);
-                    backdropMap.put(view, backdrop);
-                }
-            } catch (Throwable t) {
-                Log.e(TAG, "Failed creating FrostedBackdropDrawable: " + t.getMessage());
-            }
-        }
-
-        // 1. Draw Live Hardware Wallpaper Frosted Blur (if provider available)
-        if (backdrop != null && backdrop.drawable != null) {
-            view.getLocationOnScreen(backdrop.screenLoc);
-            float targetX = (float) backdrop.screenLoc[0];
-            float targetY = (float) backdrop.screenLoc[1];
-
-            try {
-                if (onThemeChangedMethod != null && backdrop.lastUiMode != uiMode) {
-                    onThemeChangedMethod.invoke(backdrop.drawable);
-                    backdrop.lastUiMode = uiMode;
-                }
-
-                if (updateOffsetMethod != null) {
-                    updateOffsetMethod.invoke(backdrop.drawable, targetX, targetY);
-                }
-
-                if (setClipRadiusMethod != null) {
-                    setClipRadiusMethod.invoke(backdrop.drawable, radius);
-                }
-
-                backdrop.drawable.setBounds(0, 0, w, h);
-                backdrop.drawable.draw(canvas);
-            } catch (Throwable t) {
-                Log.e(TAG, "Error drawing frosted drawable: " + t.getMessage());
-            }
-        }
-
-        // 2. Draw Pure Translucent Frosted Glass Plate (Identical transparency to 1x1 Lockscreen Widgets)
-        // High transparency: in Dark Mode, soft translucent white frost; in Light Mode, translucent milky glass
-        glassTintPaint.setColor(isDark ? 0x1AFFFFFF : 0x2AFFFFFF);
-        tempRectF.set(0, 0, w, h);
-        canvas.drawRoundRect(tempRectF, radius, radius, glassTintPaint);
-
-        // 3. Draw Touch / Press Highlight (lights up softly when pressed)
-        if (view.isPressed()) {
-            pressedHighlightPaint.setColor(isDark ? 0x35FFFFFF : 0x40FFFFFF);
-            canvas.drawRoundRect(tempRectF, radius, radius, pressedHighlightPaint);
-        }
-
-        // 4. Draw Specular Highlight Glass Border (Thin 1.5px outline matching Nothing OS widgets)
-        borderPaint.setColor(isDark ? 0x33FFFFFF : 0x22000000);
-        tempRectF.set(1.0f, 1.0f, w - 1.0f, h - 1.0f);
-        canvas.drawRoundRect(tempRectF, radius - 1.0f, radius - 1.0f, borderPaint);
-    }
-
-    private static Object getFrostedProvider(Context context, ClassLoader cl) {
-        if (providerInstance != null) {
-            return providerInstance;
-        }
-
+    private static Canvas getNativeCanvas(Object composeCanvas) {
+        if (composeCanvas == null) return null;
         try {
-            if (providerClass == null && cl != null) {
+            Method m = composeCanvas.getClass().getMethod("getInternalCanvas");
+            return (Canvas) m.invoke(composeCanvas);
+        } catch (Throwable ignored) {}
+        try {
+            Field f = composeCanvas.getClass().getDeclaredField("_internalCanvas");
+            f.setAccessible(true);
+            return (Canvas) f.get(composeCanvas);
+        } catch (Throwable ignored) {}
+        try {
+            Field f = composeCanvas.getClass().getDeclaredField("internalCanvas");
+            f.setAccessible(true);
+            return (Canvas) f.get(composeCanvas);
+        } catch (Throwable ignored) {}
+        for (Field f : composeCanvas.getClass().getDeclaredFields()) {
+            if (Canvas.class.isAssignableFrom(f.getType())) {
                 try {
-                    providerClass = XposedHelpers.findClass("com.nothing.cardhost.frosted.FrostedBackdropProvider", cl);
-                } catch (Throwable ignored) {
-                    providerClass = XposedHelpers.findClass("com.nothing.systemui.widget.NTKeyguardFrostedBackdrop", cl);
-                }
-            }
-            if (providerClass == null) {
-                return null;
-            }
-
-            // 1. Check Companion.getInstance()
-            try {
-                Field compField = providerClass.getDeclaredField("Companion");
-                compField.setAccessible(true);
-                Object companion = compField.get(null);
-                if (companion != null) {
-                    Method getInst = companion.getClass().getMethod("getInstance");
-                    Object inst = getInst.invoke(companion);
-                    if (inst != null) {
-                        providerInstance = inst;
-                        return providerInstance;
-                    }
-                    if (context != null) {
-                        Method initMethod = companion.getClass().getMethod("init", Context.class);
-                        initMethod.invoke(companion, context);
-                        inst = getInst.invoke(companion);
-                        if (inst != null) {
-                            providerInstance = inst;
-                            return providerInstance;
-                        }
-                    }
-                }
-            } catch (Throwable ignored) {}
-
-            // 2. Check static field 'instance'
-            try {
-                Field instanceField = providerClass.getDeclaredField("instance");
-                instanceField.setAccessible(true);
-                Object inst = instanceField.get(null);
-                if (inst != null) {
-                    providerInstance = inst;
-                    return providerInstance;
-                }
-            } catch (Throwable ignored) {}
-
-            // 3. Any static field matching providerClass
-            for (Field f : providerClass.getDeclaredFields()) {
-                if (Modifier.isStatic(f.getModifiers()) && providerClass.isAssignableFrom(f.getType())) {
                     f.setAccessible(true);
-                    Object inst = f.get(null);
-                    if (inst != null) {
-                        providerInstance = inst;
-                        return providerInstance;
-                    }
-                }
+                    Canvas c = (Canvas) f.get(composeCanvas);
+                    if (c != null) return c;
+                } catch (Throwable ignored) {}
             }
-        } catch (Throwable t) {
-            Log.e(TAG, "Error resolving FrostedBackdropProvider: " + t.getMessage());
         }
         return null;
-    }
-
-    private static class FrostedShortcutBackdrop {
-        final Drawable drawable;
-        final int[] screenLoc = new int[2];
-        int lastUiMode = -1;
-
-        FrostedShortcutBackdrop(Drawable drawable) {
-            this.drawable = drawable;
-        }
     }
 }
