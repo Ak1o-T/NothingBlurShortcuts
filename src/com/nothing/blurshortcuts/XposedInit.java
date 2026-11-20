@@ -66,7 +66,11 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static final float[] sCornerRadii = new float[8];
 
     // Pre-reflected fast methods for notification rows
+    private static Method sIsExpandedMethod = null;
     private static Method sIsUserExpandedMethod = null;
+    private static Method sIsGroupExpandedMethod = null;
+    private static Method sIsChildInGroupMethod = null;
+    private static Method sIsSummaryWithChildrenMethod = null;
     private static Method sIsOnKeyguardMethod = null;
     private static Method sIsPinnedMethod = null;
     private static Method sIsColorizedMethod = null;
@@ -521,6 +525,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         sIsDozing = true;
                         sDozeAmount = 1.0f;
+                        if (sNsslView != null) {
+                            sNsslView.postInvalidate();
+                        }
                     }
                 });
                 XposedBridge.hookAllMethods(kvmCls, "onStartedWakingUp", new XC_MethodHook() {
@@ -563,6 +570,17 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         if (param.args.length > 0 && param.args[0] instanceof Integer) {
                             sStatusBarState = (Integer) param.args[0];
+                        }
+                    }
+                });
+                XposedBridge.hookAllMethods(sscCls, "onShadeOrQsExpanded", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args.length > 0 && param.args[0] instanceof Boolean) {
+                            sIsShadeExpanded = (Boolean) param.args[0];
+                            if (sNsslView != null) {
+                                sNsslView.postInvalidate();
+                            }
                         }
                     }
                 });
@@ -729,7 +747,11 @@ public class XposedInit implements IXposedHookLoadPackage {
             }
 
             // Pre-reflect methods on ExpandableNotificationRow for maximum 120 FPS performance
+            try { sIsExpandedMethod = notifRowClass.getMethod("isExpanded"); sIsExpandedMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sIsUserExpandedMethod = notifRowClass.getMethod("isUserExpanded"); sIsUserExpandedMethod.setAccessible(true); } catch (Throwable ignored) {}
+            try { sIsGroupExpandedMethod = notifRowClass.getMethod("isGroupExpanded"); sIsGroupExpandedMethod.setAccessible(true); } catch (Throwable ignored) {}
+            try { sIsChildInGroupMethod = notifRowClass.getMethod("isChildInGroup"); sIsChildInGroupMethod.setAccessible(true); } catch (Throwable ignored) {}
+            try { sIsSummaryWithChildrenMethod = notifRowClass.getMethod("isSummaryWithChildren"); sIsSummaryWithChildrenMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sIsOnKeyguardMethod = notifRowClass.getMethod("isOnKeyguard"); sIsOnKeyguardMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sIsPinnedMethod = notifRowClass.getMethod("isPinned"); sIsPinnedMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sIsColorizedMethod = notifRowClass.getMethod("isColorized"); sIsColorizedMethod.setAccessible(true); } catch (Throwable ignored) {}
@@ -773,10 +795,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                             sDozeAmount = (Float) XposedHelpers.getObjectField(sStatusBarStateController, "mDozeAmount");
                         } catch (Throwable ignored) {}
                         try {
-                            sIsDozing = (Boolean) XposedHelpers.getObjectField(sStatusBarStateController, "mIsDozing");
+                            sStatusBarState = (Integer) XposedHelpers.getObjectField(sStatusBarStateController, "mState");
                         } catch (Throwable ignored) {}
                         try {
-                            sStatusBarState = (Integer) XposedHelpers.getObjectField(sStatusBarStateController, "mState");
+                            sIsShadeExpanded = (Boolean) XposedHelpers.getObjectField(sStatusBarStateController, "mIsExpanded");
                         } catch (Throwable ignored) {}
                     }
 
@@ -789,11 +811,21 @@ public class XposedInit implements IXposedHookLoadPackage {
                         } catch (Throwable ignored) {}
                     }
 
+                    if (sNsslView != null) {
+                        try {
+                            boolean nsslExp = (Boolean) XposedHelpers.getObjectField(sNsslView, "mIsExpanded");
+                            if (nsslExp) {
+                                sIsShadeExpanded = true;
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+
                     // 3. AOD / Sleep check:
                     // If device is dozing or screen is off: cancel onDraw so standard solid card is NOT drawn!
+                    // Tell SurfaceFlinger to disable blur immediately via cleanupBlur(bgView).
                     // Background stays completely clean and transparent on AOD without showing any white cards or lingering blur.
-                    // DO NOT call cleanupBlur here so mBackgroundBlurDrawable stays attached and ready for instant wake-up.
-                    if (sIsDozing || sDozeAmount >= 0.95f) {
+                    if (sIsDozing) {
+                        cleanupBlur(bgView);
                         param.setResult(null);
                         return;
                     }
@@ -808,9 +840,15 @@ public class XposedInit implements IXposedHookLoadPackage {
                     boolean isShelf = false;
                     boolean onKeyguard = false;
                     boolean rowOnKeyguard = false;
+                    boolean isExpanded = false;
                     boolean isUserExpanded = false;
+                    boolean isGroupExpanded = false;
+                    boolean isChildInGroup = false;
+                    boolean isSummaryWithChildren = false;
+                    boolean isExpandAnimationRunning = false;
 
                     try { onKeyguard = (Boolean) XposedHelpers.getObjectField(bgView, "mOnKeyguard"); } catch (Throwable ignored) {}
+                    try { isExpandAnimationRunning = (Boolean) XposedHelpers.getObjectField(bgView, "mExpandAnimationRunning"); } catch (Throwable ignored) {}
 
                     if (parent != null && notifRowClass.isAssignableFrom(parent.getClass())) {
                         if (sIsOnKeyguardMethod != null) {
@@ -828,33 +866,58 @@ public class XposedInit implements IXposedHookLoadPackage {
                         } else {
                             try { isColorized = (Boolean) XposedHelpers.callMethod(parent, "isColorized"); } catch (Throwable ignored) {}
                         }
+                        if (sIsExpandedMethod != null) {
+                            try { isExpanded = (Boolean) sIsExpandedMethod.invoke(parent); } catch (Throwable ignored) {}
+                        } else {
+                            try { isExpanded = (Boolean) XposedHelpers.callMethod(parent, "isExpanded"); } catch (Throwable ignored) {}
+                        }
                         if (sIsUserExpandedMethod != null) {
                             try { isUserExpanded = (Boolean) sIsUserExpandedMethod.invoke(parent); } catch (Throwable ignored) {}
                         } else {
                             try { isUserExpanded = (Boolean) XposedHelpers.callMethod(parent, "isUserExpanded"); } catch (Throwable ignored) {}
                         }
+                        if (sIsGroupExpandedMethod != null) {
+                            try { isGroupExpanded = (Boolean) sIsGroupExpandedMethod.invoke(parent); } catch (Throwable ignored) {}
+                        } else {
+                            try { isGroupExpanded = (Boolean) XposedHelpers.callMethod(parent, "isGroupExpanded"); } catch (Throwable ignored) {}
+                        }
+                        if (sIsChildInGroupMethod != null) {
+                            try { isChildInGroup = (Boolean) sIsChildInGroupMethod.invoke(parent); } catch (Throwable ignored) {}
+                        } else {
+                            try { isChildInGroup = (Boolean) XposedHelpers.callMethod(parent, "isChildInGroup"); } catch (Throwable ignored) {}
+                        }
+                        if (sIsSummaryWithChildrenMethod != null) {
+                            try { isSummaryWithChildren = (Boolean) sIsSummaryWithChildrenMethod.invoke(parent); } catch (Throwable ignored) {}
+                        } else {
+                            try { isSummaryWithChildren = (Boolean) XposedHelpers.callMethod(parent, "isSummaryWithChildren"); } catch (Throwable ignored) {}
+                        }
                     } else if (parent != null && shelfCls != null && shelfCls.isAssignableFrom(parent.getClass())) {
                         isShelf = true;
                     }
 
+                    // Any expansion (user expanded, auto/system expanded, group expanded, child in group, or running expand animation)
+                    // reverts to standard stock notification card!
+                    boolean isAnyExpanded = isExpanded || isUserExpanded || isGroupExpanded || isChildInGroup || isExpandAnimationRunning;
+
                     // 5. Target determination:
                     // State: 1 = KEYGUARD, 0 = SHADE, 2 = SHADE_LOCKED
-                    // When shade menu is opened over lockscreen, state transitions to 2 (SHADE_LOCKED), or lsToShade > 0.05f, or fractionToShade > 0.05f.
-                    boolean isShadeOrMenu = (state != 1) || (lsToShade > 0.05f) || (fractionToShade > 0.05f);
+                    // When shade menu is opened (from desktop state==0, or from lockscreen state==2 SHADE_LOCKED,
+                    // or when sIsShadeExpanded is true, or during pulldown transition):
+                    boolean isShadeOrMenu = (state != 1) || sIsShadeExpanded || (lsToShade > 0.05f) || (fractionToShade > 0.05f);
 
-                    // Lockscreen notifications (cards & shelf) ONLY when resting cleanly on lockscreen (state == 1)
+                    // Lockscreen notifications (cards & shelf) ONLY when cleanly resting on lockscreen (state == 1),
+                    // physically flagged as onKeyguard, not in shade menu, and NOT expanded.
                     boolean isLockscreenTarget = (state == 1)
+                            && (onKeyguard || rowOnKeyguard || isShelf)
                             && !isShadeOrMenu
-                            && !isUserExpanded;
+                            && !isAnyExpanded;
 
                     // Heads-up incoming pop-up notifications over active apps (state == 0 and actively pinned banner)
-                    boolean isHeadsUpTarget = (state == 0) && isPinned && (lsToShade <= 0.05f) && (fractionToShade <= 0.05f);
+                    boolean isHeadsUpTarget = (state == 0) && isPinned && !isShadeOrMenu && !isAnyExpanded;
 
                     boolean isTarget = (isLockscreenTarget || isHeadsUpTarget) && !isColorized;
                     if (!isTarget) {
-                        if (state != 1 || lsToShade > 0.05f || fractionToShade > 0.05f || isUserExpanded) {
-                            cleanupBlur(bgView);
-                        }
+                        cleanupBlur(bgView);
                         return;
                     }
 
@@ -960,16 +1023,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                         } catch (Throwable ignored) {}
                     }
 
-                    float fade = Math.max(0.0f, Math.min(1.0f, 1.0f - sDozeAmount));
-                    int blurRadius = Math.max(1, Math.round(160 * fade));
-                    int tintBase = isDark ? 0x44 : 0x38;
-                    int borderBase = isDark ? 0x28 : 0x45;
-                    int tintAlpha = Math.round(tintBase * fade);
-                    int borderAlpha = Math.round(borderBase * fade);
-
                     if (blurDrawable != null) {
                         try {
-                            XposedHelpers.callMethod(blurDrawable, "setBlurRadius", blurRadius);
+                            XposedHelpers.callMethod(blurDrawable, "setBlurRadius", 160);
                         } catch (Throwable ignored) {}
                         try {
                             XposedHelpers.callMethod(blurDrawable, "setCornerRadius", topRadius, topRadius, bottomRadius, bottomRadius);
@@ -985,11 +1041,11 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     // 2. Frosted Glass Tint & Specular Rim
                     if (isDark) {
-                        glassTintPaint.setColor((tintAlpha << 24));
-                        glassBorderPaint.setColor((borderAlpha << 24) | 0x00FFFFFF);
+                        glassTintPaint.setColor(0x44000000);
+                        glassBorderPaint.setColor(0x28FFFFFF);
                     } else {
-                        glassTintPaint.setColor((tintAlpha << 24) | 0x00FFFFFF);
-                        glassBorderPaint.setColor((borderAlpha << 24) | 0x00FFFFFF);
+                        glassTintPaint.setColor(0x38FFFFFF);
+                        glassBorderPaint.setColor(0x45FFFFFF);
                     }
 
                     canvas.drawPath(sClipPath, glassTintPaint);
@@ -1134,7 +1190,6 @@ public class XposedInit implements IXposedHookLoadPackage {
             Object bd = XposedHelpers.getObjectField(bgView, "mBackgroundBlurDrawable");
             if (bd != null) {
                 XposedHelpers.callMethod(bd, "setBlurRadius", 0);
-                XposedHelpers.setObjectField(bgView, "mBackgroundBlurDrawable", null);
             }
         } catch (Throwable ignored) {}
     }
