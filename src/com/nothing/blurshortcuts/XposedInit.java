@@ -60,10 +60,7 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static volatile int sStatusBarState = 1; // 1 = KEYGUARD, 0 = SHADE, 2 = SHADE_LOCKED
     private static volatile float sLsToShadeProgress = 0.0f;
     private static volatile float sFractionToShade = 0.0f;
-    private static volatile boolean sIsDozing = false;
-    private static volatile boolean sGoingToSleep = false;
-    private static volatile boolean sWakingUp = false;
-    private static volatile float sDozeAmount = 0.0f;
+    private static volatile boolean sScreenAwake = true;
     private static volatile boolean sInitialized = false;
 
     // Global tracking of all notification background views for instant zero-latency blur sleep/wake
@@ -535,49 +532,26 @@ public class XposedInit implements IXposedHookLoadPackage {
 
         // 5. Hook Notifications for Lockscreen & Heads-Up Frosted Blur Style
         try {
-            // Instant zero-latency sleep/wake response via WakefulnessLifecycle & KeyguardViewMediator
-            try {
-                Class<?> wlCls = cl.loadClass("com.android.systemui.keyguard.WakefulnessLifecycle");
-                XposedBridge.hookAllMethods(wlCls, "dispatchStartedGoingToSleep", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        sIsDozing = true;
-                        sGoingToSleep = true;
-                        sWakingUp = false;
-                        sDozeAmount = 1.0f;
-                        clearAllNotificationBlurs();
-                    }
-                });
-                XposedBridge.hookAllMethods(wlCls, "dispatchStartedWakingUp", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        handleWakingUp();
-                    }
-                });
-                Log.e(TAG, "WakefulnessLifecycle hooked for instant sleep/wake response!");
-            } catch (Throwable t) {
-                Log.e(TAG, "WakefulnessLifecycle hook check: " + t.getMessage());
-            }
-
+            // Instant zero-latency sleep/wake response
             try {
                 Class<?> kvmCls = cl.loadClass("com.android.systemui.keyguard.KeyguardViewMediator");
                 XC_MethodHook sleepKvmHook = new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        sIsDozing = true;
-                        sGoingToSleep = true;
-                        sWakingUp = false;
-                        sDozeAmount = 1.0f;
+                        sScreenAwake = false;
                         clearAllNotificationBlurs();
                     }
                 };
-                XposedBridge.hookAllMethods(kvmCls, "onStartedGoingToSleep", sleepKvmHook);
-                XposedBridge.hookAllMethods(kvmCls, "onStartedWakingUp", new XC_MethodHook() {
+                XC_MethodHook wakeKvmHook = new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         handleWakingUp();
                     }
-                });
+                };
+                try { XposedBridge.hookAllMethods(kvmCls, "onStartedGoingToSleep", sleepKvmHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(kvmCls, "handleNotifyStartedGoingToSleep", sleepKvmHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(kvmCls, "onStartedWakingUp", wakeKvmHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(kvmCls, "handleNotifyWakingUp", wakeKvmHook); } catch (Throwable ignored) {}
                 Log.e(TAG, "KeyguardViewMediator hooked for instant sleep/wake response!");
             } catch (Throwable t) {
                 Log.e(TAG, "KeyguardViewMediator hook check: " + t.getMessage());
@@ -585,6 +559,13 @@ public class XposedInit implements IXposedHookLoadPackage {
 
             try {
                 Class<?> kumCls = cl.loadClass("com.android.keyguard.KeyguardUpdateMonitor");
+                XposedBridge.hookAllMethods(kumCls, "dispatchStartedGoingToSleep", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        sScreenAwake = false;
+                        clearAllNotificationBlurs();
+                    }
+                });
                 XposedBridge.hookAllMethods(kumCls, "dispatchStartedWakingUp", new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
@@ -593,7 +574,24 @@ public class XposedInit implements IXposedHookLoadPackage {
                 });
             } catch (Throwable ignored) {}
 
-            // Track Status Bar State & Dozing via StatusBarStateControllerImpl
+            try {
+                Class<?> slCls = cl.loadClass("com.android.systemui.keyguard.ScreenLifecycle");
+                XposedBridge.hookAllMethods(slCls, "dispatchScreenTurningOff", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        sScreenAwake = false;
+                        clearAllNotificationBlurs();
+                    }
+                });
+                XposedBridge.hookAllMethods(slCls, "dispatchScreenTurningOn", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        handleWakingUp();
+                    }
+                });
+            } catch (Throwable ignored) {}
+
+            // Track Status Bar State via StatusBarStateControllerImpl
             try {
                 Class<?> sscCls = cl.loadClass("com.android.systemui.statusbar.StatusBarStateControllerImpl");
                 XposedBridge.hookAllConstructors(sscCls, new XC_MethodHook() {
@@ -621,70 +619,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
                     }
                 });
-                XposedBridge.hookAllMethods(sscCls, "setIsDozing", new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        sStatusBarStateController = param.thisObject;
-                        if (param.args.length > 0 && param.args[0] instanceof Boolean) {
-                            boolean wasDozing = sIsDozing;
-                            sIsDozing = (Boolean) param.args[0];
-                            if (sIsDozing) {
-                                sGoingToSleep = true;
-                                sWakingUp = false;
-                                clearAllNotificationBlurs();
-                            } else {
-                                sGoingToSleep = false;
-                                if (wasDozing) {
-                                    handleWakingUp();
-                                }
-                            }
-                        }
-                        try {
-                            sDozeAmount = (Float) XposedHelpers.getObjectField(param.thisObject, "mDozeAmount");
-                        } catch (Throwable ignored) {}
-                    }
-                });
-                XposedBridge.hookAllMethods(sscCls, "finishDozeAnimation", new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        sStatusBarStateController = param.thisObject;
-                        float amt = 0.0f;
-                        try {
-                            amt = (Float) XposedHelpers.getObjectField(param.thisObject, "mDozeAmount");
-                        } catch (Throwable t) {
-                            amt = 0.0f;
-                        }
-                        sDozeAmount = amt;
-                        sGoingToSleep = false;
-                        if (amt > 0.5f) {
-                            sIsDozing = true;
-                            clearAllNotificationBlurs();
-                        } else {
-                            sIsDozing = false;
-                            sWakingUp = false;
-                            invalidateNotificationStack();
-                        }
-                    }
-                });
-                XC_MethodHook dozeAmountHook = new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        sStatusBarStateController = param.thisObject;
-                        if (param.args.length > 0 && param.args[0] instanceof Float) {
-                            float amt = (Float) param.args[0];
-                            sDozeAmount = amt;
-                            if (amt > 0.001f && !sWakingUp) {
-                                sGoingToSleep = true;
-                                clearAllNotificationBlurs();
-                            } else if (amt <= 0.001f) {
-                                sGoingToSleep = false;
-                                sWakingUp = false;
-                            }
-                        }
-                    }
-                };
-                try { XposedBridge.hookAllMethods(sscCls, "setDozeAmountInternal", dozeAmountHook); } catch (Throwable ignored) {}
-                try { XposedBridge.hookAllMethods(sscCls, "setAndInstrumentDozeAmount", dozeAmountHook); } catch (Throwable ignored) {}
             } catch (Throwable ignored) {}
 
             // Track state via AmbientState
@@ -720,43 +654,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                         sAmbientState = param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
                             sFractionToShade = (Float) param.args[0];
-                        }
-                    }
-                });
-                XposedBridge.hookAllMethods(asCls, "setDozing", new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        sAmbientState = param.thisObject;
-                        if (param.args.length > 0 && param.args[0] instanceof Boolean) {
-                            boolean wasDozing = sIsDozing;
-                            sIsDozing = (Boolean) param.args[0];
-                            if (sIsDozing) {
-                                sGoingToSleep = true;
-                                sWakingUp = false;
-                                clearAllNotificationBlurs();
-                            } else {
-                                sGoingToSleep = false;
-                                if (wasDozing) {
-                                    handleWakingUp();
-                                }
-                            }
-                        }
-                    }
-                });
-                XposedBridge.hookAllMethods(asCls, "setDozeAmount", new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        sAmbientState = param.thisObject;
-                        if (param.args.length > 0 && param.args[0] instanceof Float) {
-                            float amt = (Float) param.args[0];
-                            sDozeAmount = amt;
-                            if (amt > 0.001f && !sWakingUp) {
-                                sGoingToSleep = true;
-                                clearAllNotificationBlurs();
-                            } else if (amt <= 0.001f) {
-                                sGoingToSleep = false;
-                                sWakingUp = false;
-                            }
                         }
                     }
                 });
@@ -861,11 +758,8 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
                     }
 
-                    // 2. Read live status bar, shade & doze state directly from controller
+                    // 2. Read live status bar & shade state directly from controller
                     if (sStatusBarStateController != null) {
-                        try {
-                            sDozeAmount = (Float) XposedHelpers.getObjectField(sStatusBarStateController, "mDozeAmount");
-                        } catch (Throwable ignored) {}
                         try {
                             sStatusBarState = (Integer) XposedHelpers.getObjectField(sStatusBarStateController, "mState");
                         } catch (Throwable ignored) {}
@@ -880,14 +774,11 @@ public class XposedInit implements IXposedHookLoadPackage {
                         } catch (Throwable ignored) {}
                     }
 
-                    // 3. AOD / Sleep check:
-                    // If device is dozing or starting to go to sleep (and NOT in waking up phase):
-                    // Immediately disable blur in SurfaceFlinger via cleanupBlur(bgView) and cancel onDraw!
-                    // This makes notification blur disappear instantly alongside the bottom shortcuts when transition starts!
-                    // When waking up (sWakingUp == true), blur is drawn immediately on frame 0 without being blocked!
-                    if (!sWakingUp && (sIsDozing || sGoingToSleep || sDozeAmount > 0.001f)) {
+                    // 3. Screen awake / Sleep / AOD check:
+                    // If device is going to sleep, sleeping, or on AOD:
+                    // Set blur radius to 0 and let stock background draw or fade cleanly without blur!
+                    if (!sScreenAwake) {
                         cleanupBlur(bgView);
-                        param.setResult(null);
                         return;
                     }
 
@@ -1277,10 +1168,7 @@ public class XposedInit implements IXposedHookLoadPackage {
     }
 
     private static void handleWakingUp() {
-        sIsDozing = false;
-        sGoingToSleep = false;
-        sWakingUp = true;
-        sDozeAmount = 0.0f;
+        sScreenAwake = true;
 
         Runnable action = new Runnable() {
             @Override
@@ -1318,7 +1206,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                 try {
                     XposedHelpers.callMethod(bd, "setBlurRadius", 0);
                 } catch (Throwable ignored) {}
-                XposedHelpers.setObjectField(bgView, "mBackgroundBlurDrawable", null);
             }
         } catch (Throwable ignored) {}
     }
