@@ -1269,6 +1269,39 @@ public class XposedInit implements IXposedHookLoadPackage {
             try { XposedBridge.hookAllMethods(notifRowClass, "setShowingExpanded", rowExpansionHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifRowClass, "setGroupExpanded", rowExpansionHook); } catch (Throwable ignored) {}
 
+            if (notifShelfClass != null) {
+                try {
+                    XC_MethodHook shelfInvalidateHook = new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            if (sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                                View shelf = (View) param.thisObject;
+                                if (shelf != null) {
+                                    shelf.invalidate();
+                                    try {
+                                        View bg = (View) XposedHelpers.getObjectField(shelf, "mBackgroundNormal");
+                                        if (bg != null) bg.invalidate();
+                                    } catch (Throwable ignored) {}
+                                }
+                            }
+                        }
+                    };
+                    try { XposedBridge.hookAllMethods(notifShelfClass, "updateAppearance", shelfInvalidateHook); } catch (Throwable ignored) {}
+                    try { XposedBridge.hookAllMethods(notifShelfClass, "setBackgroundWidth", shelfInvalidateHook); } catch (Throwable ignored) {}
+                    try { XposedBridge.hookAllMethods(notifShelfClass, "updateState", shelfInvalidateHook); } catch (Throwable ignored) {}
+                    try {
+                        XposedBridge.hookAllMethods(notifShelfClass, "setHideBackground", new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                if (sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                                    param.args[0] = false;
+                                }
+                            }
+                        });
+                    } catch (Throwable ignored) {}
+                } catch (Throwable ignored) {}
+            }
+
             XC_MethodHook notifDrawHook = new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
@@ -1361,7 +1394,8 @@ public class XposedInit implements IXposedHookLoadPackage {
                     // 4. Fast direct method invocation on parent row
                     boolean isPinned = false;
                     boolean isColorized = false;
-                    boolean isShelf = false;
+                    String bgCls = bgView.getClass().getName();
+                    boolean isShelf = bgCls.contains("Shelf") || (parent != null && parent.getClass().getName().contains("Shelf"));
 
                     if (parent != null && notifRowClass.isAssignableFrom(parent.getClass())) {
                         if (sIsPinnedMethod != null) {
@@ -1379,6 +1413,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                         isShelf = true;
                     }
 
+                    if (isShelf) {
+                        isColorized = false;
+                    }
+
                     // 5. Shade state & progress verification:
                     // State: 1 = KEYGUARD (resting lockscreen), 0 = SHADE (desktop/unlocked), 2 = SHADE_LOCKED (shade menu opened over lockscreen)
                     // While on KEYGUARD (state == 1), only consider leaving keyguard if user is actively pulling shade down (> 20%)
@@ -1388,12 +1426,16 @@ public class XposedInit implements IXposedHookLoadPackage {
                     // 6. Target determination:
                     // Frosted Glass Blur applies to:
                     // - All notifications on the resting lockscreen (onKeyguard), both collapsed and expanded
+                    // - Compact notification shelf collage capsule (isShelf)
                     // - Heads-Up pinned alerts over apps (isPinned)
                     // Excluded from blur:
                     // - Notifications in Notification Shade / Shade Menu (inShade)
                     // - Bouncer (PIN/password/pattern screen)
                     // - Colorized media player with album art
                     boolean isTarget = (onKeyguard || isPinned) && !isColorized && !sBouncerShowing;
+                    if (isShelf) {
+                        isTarget = onKeyguard && !sBouncerShowing;
+                    }
 
                     Canvas canvas = (Canvas) param.args[0];
                     if (canvas == null) return;
@@ -1412,7 +1454,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                             try { showNoBg = sShowNoBackgroundField.getBoolean(parent); } catch (Throwable ignored) {}
                         }
                     }
-                    if (showNoBg) {
+                    if (showNoBg && !isShelf) {
                         cleanupBlur(bgView);
                         param.setResult(null);
                         return;
@@ -1426,18 +1468,22 @@ public class XposedInit implements IXposedHookLoadPackage {
                     if (sActualWidthField != null) {
                         try { actualWidth = sActualWidthField.getInt(bgView); } catch (Throwable ignored) {}
                     }
+                    if (isShelf && actualWidth <= 0 && parent != null) {
+                        try { actualWidth = (Integer) XposedHelpers.callMethod(parent, "getActualWidth"); } catch (Throwable ignored) {}
+                    }
+                    if (actualWidth <= 0) actualWidth = bgView.getWidth();
+
                     int actualHeight = 0;
                     if (sActualHeightField != null) {
                         try { actualHeight = sActualHeightField.getInt(bgView); } catch (Throwable ignored) {}
                     }
-
-                    if (actualWidth <= 0) actualWidth = bgView.getWidth();
-                    if (actualHeight <= 0) {
-                        if (parent != null && sGetActualHeightMethod != null) {
-                            try { actualHeight = (Integer) sGetActualHeightMethod.invoke(parent); } catch (Throwable ignored) {}
-                        }
-                        if (actualHeight <= 0) actualHeight = bgView.getHeight();
+                    if (actualHeight <= 0 && parent != null && sGetActualHeightMethod != null) {
+                        try { actualHeight = (Integer) sGetActualHeightMethod.invoke(parent); } catch (Throwable ignored) {}
                     }
+                    if (actualHeight <= 0 && parent != null) {
+                        try { actualHeight = (Integer) XposedHelpers.callMethod(parent, "getActualHeight"); } catch (Throwable ignored) {}
+                    }
+                    if (actualHeight <= 0) actualHeight = bgView.getHeight();
 
                     int clipTop = 0;
                     if (sClipTopAmountField != null) {
@@ -1448,8 +1494,15 @@ public class XposedInit implements IXposedHookLoadPackage {
                         try { clipBottom = sClipBottomAmountField.getInt(bgView); } catch (Throwable ignored) {}
                     }
 
-                    int drawLeft = 0;
-                    int drawRight = actualWidth;
+                    boolean alignedRight = false;
+                    if (isShelf) {
+                        try {
+                            alignedRight = (Boolean) XposedHelpers.callMethod(bgView, "isAlignedToRight");
+                        } catch (Throwable ignored) {}
+                    }
+
+                    int drawLeft = alignedRight ? (bgView.getWidth() - actualWidth) : 0;
+                    int drawRight = alignedRight ? bgView.getWidth() : actualWidth;
                     int drawTop = Math.max(bgTop, clipTop);
                     int drawBottom = clipBottom > 0 ? (actualHeight - clipBottom) : actualHeight;
 
@@ -1497,7 +1550,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     canvas.clipPath(sClipPath);
 
                     if (isTarget) {
-                        // Frosted Glass Blur Mode (Lockscreen resting collapsed & Heads-Up alerts)
+                        // Frosted Glass Blur Mode (Lockscreen resting collapsed, compact shelf collage & Heads-Up alerts)
                         Object blurDrawable = null;
                         if (sBackgroundBlurDrawableField != null) {
                             try { blurDrawable = sBackgroundBlurDrawableField.get(bgView); } catch (Throwable ignored) {}
@@ -1549,10 +1602,13 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
 
                         int frostedColor = getFrostedBackdropColor(ctx, isDark);
+                        if (isShelf && isDark) {
+                            frostedColor = 0x38000000;
+                        }
                         glassTintPaint.setColor(frostedColor);
 
                         if (isDark) {
-                            glassBorderPaint.setColor(0x28FFFFFF);
+                            glassBorderPaint.setColor(isShelf ? 0x35FFFFFF : 0x28FFFFFF);
                         } else {
                             glassBorderPaint.setColor(0x35FFFFFF);
                         }
