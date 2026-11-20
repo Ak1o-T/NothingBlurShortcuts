@@ -102,11 +102,13 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     private static final Paint glassTintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint glassBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private static final Paint solidBgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     static {
         glassTintPaint.setStyle(Paint.Style.FILL);
         glassBorderPaint.setStyle(Paint.Style.STROKE);
         glassBorderPaint.setStrokeWidth(2.0f); // 2px crisp specular border
+        solidBgPaint.setStyle(Paint.Style.FILL);
     }
 
     @Override
@@ -970,10 +972,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                     // - AND NOT expanded (user expanded / showing expanded / group expanded / child in group)
                     // - AND NOT colorized (media player with album art)
                     boolean isTarget = (onKeyguard || isPinned) && !isExpanded && !isColorized;
-                    if (!isTarget) {
-                        cleanupBlur(bgView);
-                        return;
-                    }
 
                     Canvas canvas = (Canvas) param.args[0];
                     if (canvas == null) return;
@@ -983,6 +981,22 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     int uiMode = ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
                     boolean isDark = (uiMode == Configuration.UI_MODE_NIGHT_YES);
+
+                    boolean showNoBg = false;
+                    if (parent != null) {
+                        try {
+                            showNoBg = (Boolean) XposedHelpers.callMethod(parent, "isShowNoBackground");
+                        } catch (Throwable t) {
+                            try {
+                                showNoBg = (Boolean) XposedHelpers.getObjectField(parent, "mShowNoBackground");
+                            } catch (Throwable ignored) {}
+                        }
+                    }
+                    if (showNoBg) {
+                        cleanupBlur(bgView);
+                        param.setResult(null);
+                        return;
+                    }
 
                     int bgTop = 0;
                     try { bgTop = (Integer) XposedHelpers.getObjectField(bgView, "mBackgroundTop"); } catch (Throwable ignored) {}
@@ -1061,54 +1075,77 @@ public class XposedInit implements IXposedHookLoadPackage {
                     canvas.save();
                     canvas.clipPath(sClipPath);
 
-                    // 1. Hardware cross-window GPU blur
-                    Object blurDrawable = null;
-                    try {
-                        blurDrawable = XposedHelpers.getObjectField(bgView, "mBackgroundBlurDrawable");
-                    } catch (Throwable ignored) {}
+                    if (isTarget) {
+                        // Frosted Glass Blur Mode (Lockscreen resting collapsed & Heads-Up alerts)
+                        Object blurDrawable = null;
+                        try {
+                            blurDrawable = XposedHelpers.getObjectField(bgView, "mBackgroundBlurDrawable");
+                        } catch (Throwable ignored) {}
 
-                    if (blurDrawable == null) {
-                        try {
-                            Object vri = XposedHelpers.callMethod(bgView, "getViewRootImpl");
-                            if (vri != null) {
-                                blurDrawable = XposedHelpers.callMethod(vri, "createBackgroundBlurDrawable");
-                                XposedHelpers.setObjectField(bgView, "mBackgroundBlurDrawable", blurDrawable);
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-
-                    if (blurDrawable != null) {
-                        try {
-                            ((Drawable) blurDrawable).setVisible(true, false);
-                        } catch (Throwable ignored) {}
-                        try {
-                            XposedHelpers.callMethod(blurDrawable, "setBlurRadius", 160);
-                        } catch (Throwable ignored) {}
-                        try {
-                            XposedHelpers.callMethod(blurDrawable, "setCornerRadius", topRadius, topRadius, bottomRadius, bottomRadius);
-                        } catch (Throwable t) {
+                        if (blurDrawable == null) {
                             try {
-                                XposedHelpers.callMethod(blurDrawable, "setCornerRadius", Math.max(topRadius, bottomRadius));
+                                Object vri = XposedHelpers.callMethod(bgView, "getViewRootImpl");
+                                if (vri != null) {
+                                    blurDrawable = XposedHelpers.callMethod(vri, "createBackgroundBlurDrawable");
+                                    XposedHelpers.setObjectField(bgView, "mBackgroundBlurDrawable", blurDrawable);
+                                }
                             } catch (Throwable ignored) {}
                         }
-                        Drawable bd = (Drawable) blurDrawable;
-                        bd.setBounds(drawLeft, drawTop, drawRight, drawBottom);
-                        bd.draw(canvas);
-                    }
 
-                    // 2. Frosted Glass Tint & Specular Rim
-                    if (isDark) {
-                        glassTintPaint.setColor(0x44000000);
-                        glassBorderPaint.setColor(0x28FFFFFF);
+                        if (blurDrawable != null) {
+                            try {
+                                ((Drawable) blurDrawable).setVisible(true, false);
+                            } catch (Throwable ignored) {}
+                            try {
+                                XposedHelpers.callMethod(blurDrawable, "setBlurRadius", 160);
+                            } catch (Throwable ignored) {}
+                            try {
+                                XposedHelpers.callMethod(blurDrawable, "setCornerRadius", topRadius, topRadius, bottomRadius, bottomRadius);
+                            } catch (Throwable t) {
+                                try {
+                                    XposedHelpers.callMethod(blurDrawable, "setCornerRadius", Math.max(topRadius, bottomRadius));
+                                } catch (Throwable ignored) {}
+                            }
+                            Drawable bd = (Drawable) blurDrawable;
+                            bd.setBounds(drawLeft, drawTop, drawRight, drawBottom);
+                            bd.draw(canvas);
+                        }
+
+                        if (isDark) {
+                            glassTintPaint.setColor(0x44000000);
+                            glassBorderPaint.setColor(0x28FFFFFF);
+                        } else {
+                            glassTintPaint.setColor(0x38FFFFFF);
+                            glassBorderPaint.setColor(0x45FFFFFF);
+                        }
+
+                        canvas.drawPath(sClipPath, glassTintPaint);
+                        canvas.drawPath(sClipPath, glassBorderPaint);
                     } else {
-                        glassTintPaint.setColor(0x38FFFFFF);
-                        glassBorderPaint.setColor(0x45FFFFFF);
+                        // Stock System Notification Background Mode (Shade menu, expanded rows, groups)
+                        cleanupBlur(bgView);
+
+                        int defaultBgColor = 0;
+                        if (parent != null) {
+                            try {
+                                defaultBgColor = (Integer) XposedHelpers.callMethod(parent, "getNormalColor");
+                            } catch (Throwable ignored) {}
+                        }
+                        if (defaultBgColor == 0 || (defaultBgColor & 0xFF000000) == 0) {
+                            defaultBgColor = isDark ? 0xFF202020 : 0xFFFCFCFC;
+                        }
+
+                        int tint = 0;
+                        try {
+                            tint = (Integer) XposedHelpers.getObjectField(bgView, "mTintColor");
+                        } catch (Throwable ignored) {}
+
+                        int solidColor = (tint != 0 && (tint & 0xFF000000) != 0) ? tint : defaultBgColor;
+                        solidBgPaint.setColor(solidColor);
+                        canvas.drawPath(sClipPath, solidBgPaint);
                     }
 
-                    canvas.drawPath(sClipPath, glassTintPaint);
-                    canvas.drawPath(sClipPath, glassBorderPaint);
-
-                    // 3. Ripple effect for touch feedback on top of frosted glass
+                    // Ripple effect for touch feedback on all notification cards
                     try {
                         Object bgObj = XposedHelpers.getObjectField(bgView, "mBackground");
                         if (bgObj instanceof android.graphics.drawable.LayerDrawable) {
@@ -1129,7 +1166,7 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     canvas.restore();
 
-                    // Cancel original onDraw so solid plate is not drawn
+                    // Cancel original onDraw so transparent or conflicting plates are never drawn
                     param.setResult(null);
                 }
             };
