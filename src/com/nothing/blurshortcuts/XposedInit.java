@@ -894,8 +894,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
                             float f = (Float) param.args[0];
                             sFractionToShade = f;
-                            if (f > 0.001f) {
+                            if (f > 0.20f) {
                                 clearAllNotificationBlurs();
+                            } else if (f <= 0.05f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                                invalidateNotificationStack();
                             }
                         }
                     }
@@ -1059,6 +1061,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                     View row = (View) param.thisObject;
                     if (row != null) {
+                        row.invalidate();
                         try {
                             View bgNormal = (View) XposedHelpers.getObjectField(row, "mBackgroundNormal");
                             if (bgNormal != null) {
@@ -1129,10 +1132,12 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     if (sAmbientState != null) {
                         try {
-                            sLsToShadeProgress = (Float) XposedHelpers.getObjectField(sAmbientState, "mLStoShadeProgress");
-                        } catch (Throwable ignored) {}
-                        try {
-                            sFractionToShade = (Float) XposedHelpers.getObjectField(sAmbientState, "mFractionToShade");
+                            float ls = (Float) XposedHelpers.getObjectField(sAmbientState, "mLStoShadeProgress");
+                            float frac = (Float) XposedHelpers.getObjectField(sAmbientState, "mFractionToShade");
+                            if (sStatusBarState != 1 || ls > 0.05f || frac > 0.05f) {
+                                sLsToShadeProgress = ls;
+                                sFractionToShade = frac;
+                            }
                         } catch (Throwable ignored) {}
                     }
 
@@ -1157,25 +1162,11 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
 
                     // 4. Fast direct method invocation on parent row
-                    boolean onKeyguard = (sStatusBarState == 1);
                     boolean isPinned = false;
                     boolean isColorized = false;
-                    boolean isExpanded = false;
                     boolean isShelf = false;
 
                     if (parent != null && notifRowClass.isAssignableFrom(parent.getClass())) {
-                        if (sIsOnKeyguardMethod != null) {
-                            try {
-                                Boolean ok = (Boolean) sIsOnKeyguardMethod.invoke(parent);
-                                if (ok != null) onKeyguard = ok;
-                            } catch (Throwable ignored) {}
-                        } else {
-                            try {
-                                Boolean ok = (Boolean) XposedHelpers.callMethod(parent, "isOnKeyguard");
-                                if (ok != null) onKeyguard = ok;
-                            } catch (Throwable ignored) {}
-                        }
-
                         if (sIsPinnedMethod != null) {
                             try { isPinned = (Boolean) sIsPinnedMethod.invoke(parent); } catch (Throwable ignored) {}
                         } else {
@@ -1187,65 +1178,25 @@ public class XposedInit implements IXposedHookLoadPackage {
                         } else {
                             try { isColorized = (Boolean) XposedHelpers.callMethod(parent, "isColorized"); } catch (Throwable ignored) {}
                         }
-
-                        boolean userExp = false;
-                        if (sIsUserExpandedMethod != null) {
-                            try { userExp = (Boolean) sIsUserExpandedMethod.invoke(parent); } catch (Throwable ignored) {}
-                        } else {
-                            try { userExp = (Boolean) XposedHelpers.callMethod(parent, "isUserExpanded"); } catch (Throwable ignored) {}
-                        }
-
-                        boolean showingExp = false;
-                        if (sIsShowingExpandedMethod != null) {
-                            try { showingExp = (Boolean) sIsShowingExpandedMethod.invoke(parent); } catch (Throwable ignored) {}
-                        } else {
-                            try { showingExp = (Boolean) XposedHelpers.callMethod(parent, "isShowingExpanded"); } catch (Throwable ignored) {}
-                        }
-
-                        boolean groupExp = false;
-                        if (sIsGroupExpandedMethod != null) {
-                            try { groupExp = (Boolean) sIsGroupExpandedMethod.invoke(parent); } catch (Throwable ignored) {}
-                        } else {
-                            try { groupExp = (Boolean) XposedHelpers.callMethod(parent, "isGroupExpanded"); } catch (Throwable ignored) {}
-                        }
-
-                        isExpanded = userExp || showingExp || groupExp;
-
                     } else if (parent != null && shelfCls != null && shelfCls.isAssignableFrom(parent.getClass())) {
                         isShelf = true;
-                        if (sShelfIsOnKeyguardMethod != null) {
-                            try {
-                                Boolean ok = (Boolean) sShelfIsOnKeyguardMethod.invoke(parent);
-                                if (ok != null) onKeyguard = ok;
-                            } catch (Throwable ignored) {}
-                        } else {
-                            try {
-                                Boolean ok = (Boolean) XposedHelpers.callMethod(parent, "isOnKeyguard");
-                                if (ok != null) onKeyguard = ok;
-                            } catch (Throwable ignored) {}
-                        }
                     }
 
                     // 5. Shade state & progress verification:
-                    // If on resting Lockscreen (state == 1 and shade closed): guaranteed onKeyguard!
-                    // If in Shade (pulled down or on desktop): forced off keyguard
-                    int state = sStatusBarState;
-                    float lsToShade = sLsToShadeProgress;
-                    float fractionToShade = sFractionToShade;
-                    if (state == 1 && lsToShade <= 0.001f && fractionToShade <= 0.001f) {
-                        onKeyguard = true;
-                    } else if (state == 2 || state == 0 || lsToShade > 0.001f || fractionToShade > 0.001f) {
-                        onKeyguard = false;
-                    }
+                    // State: 1 = KEYGUARD (resting lockscreen), 0 = SHADE (desktop/unlocked), 2 = SHADE_LOCKED (shade menu opened over lockscreen)
+                    // While on KEYGUARD (state == 1), only consider leaving keyguard if user is actively pulling shade down (> 20%)
+                    boolean inShade = (sStatusBarState != 1) || (sLsToShadeProgress > 0.20f) || (sFractionToShade > 0.20f);
+                    boolean onKeyguard = !inShade;
 
                     // 6. Target determination:
-                    // Only apply Frosted Glass Blur if:
-                    // - On resting lockscreen (or Heads-Up pinned alert over apps)
-                    // - AND NOT in Notification Shade
-                    // - AND NOT on Bouncer (PIN/password screen)
-                    // - AND NOT expanded (user expanded / showing expanded / group expanded)
-                    // - AND NOT colorized (media player with album art)
-                    boolean isTarget = (onKeyguard || isPinned) && !isExpanded && !isColorized && !sBouncerShowing;
+                    // Frosted Glass Blur applies to:
+                    // - All notifications on the resting lockscreen (onKeyguard), both collapsed and expanded
+                    // - Heads-Up pinned alerts over apps (isPinned)
+                    // Excluded from blur:
+                    // - Notifications in Notification Shade / Shade Menu (inShade)
+                    // - Bouncer (PIN/password/pattern screen)
+                    // - Colorized media player with album art
+                    boolean isTarget = (onKeyguard || isPinned) && !isColorized && !sBouncerShowing;
 
                     Canvas canvas = (Canvas) param.args[0];
                     if (canvas == null) return;
@@ -1568,6 +1519,14 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static void onStatusBarStateChanged(int oldState, int newState) {
         sStatusBarState = newState;
         Log.i(TAG, "onStatusBarStateChanged: " + oldState + " -> " + newState);
+        if (newState == 1) {
+            sLsToShadeProgress = 0f;
+            sFractionToShade = 0f;
+            if (sAmbientState != null) {
+                try { XposedHelpers.setObjectField(sAmbientState, "mLStoShadeProgress", 0f); } catch (Throwable ignored) {}
+                try { XposedHelpers.setObjectField(sAmbientState, "mFractionToShade", 0f); } catch (Throwable ignored) {}
+            }
+        }
         if (newState == 0 || newState == 2) {
             clearAllNotificationBlurs();
         } else if (newState == 1 && sScreenAwake && !sBouncerShowing) {
@@ -1577,9 +1536,9 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     private static void onLsToShadeProgressChanged(float progress) {
         sLsToShadeProgress = progress;
-        if (progress > 0.001f) {
+        if (progress > 0.20f) {
             clearAllNotificationBlurs();
-        } else if (progress <= 0.0001f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+        } else if (progress <= 0.05f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
             invalidateNotificationStack();
         }
     }
@@ -1607,7 +1566,13 @@ public class XposedInit implements IXposedHookLoadPackage {
                 try {
                     synchronized (sAllNotificationBackgrounds) {
                         for (View bg : sAllNotificationBackgrounds) {
-                            if (bg != null) bg.invalidate();
+                            if (bg != null) {
+                                bg.invalidate();
+                                ViewParent p = bg.getParent();
+                                if (p instanceof View) {
+                                    ((View) p).invalidate();
+                                }
+                            }
                         }
                     }
                     if (sNsslView != null) {
