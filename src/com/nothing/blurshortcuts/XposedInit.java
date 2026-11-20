@@ -55,12 +55,18 @@ public class XposedInit implements IXposedHookLoadPackage {
     // Status Bar & Shade State tracking
     private static volatile Context sAppContext = null;
     private static volatile View sNsslView = null;
+    private static volatile View sRootWindowView = null;
     private static volatile Object sStatusBarStateController = null;
     private static volatile Object sAmbientState = null;
+    private static volatile Object sStatusBarKeyguardViewManager = null;
+    private static volatile Object sKeyguardStateController = null;
+    private static volatile Object sPrimaryBouncerInteractor = null;
+    private static volatile Object sSysUiState = null;
     private static volatile int sStatusBarState = 1; // 1 = KEYGUARD, 0 = SHADE, 2 = SHADE_LOCKED
     private static volatile float sLsToShadeProgress = 0.0f;
     private static volatile float sFractionToShade = 0.0f;
     private static volatile boolean sScreenAwake = true;
+    private static volatile boolean sBouncerShowing = false;
     private static volatile boolean sInitialized = false;
 
     // Global tracking of all notification background views for instant zero-latency blur sleep/wake
@@ -562,6 +568,15 @@ public class XposedInit implements IXposedHookLoadPackage {
                 try { XposedBridge.hookAllMethods(kvmCls, "handleNotifyStartedGoingToSleep", sleepKvmHook); } catch (Throwable ignored) {}
                 try { XposedBridge.hookAllMethods(kvmCls, "onStartedWakingUp", wakeKvmHook); } catch (Throwable ignored) {}
                 try { XposedBridge.hookAllMethods(kvmCls, "handleNotifyWakingUp", wakeKvmHook); } catch (Throwable ignored) {}
+                XC_MethodHook bouncerDoneHook = new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        onBouncerShowingChanged(false);
+                    }
+                };
+                try { XposedBridge.hookAllMethods(kvmCls, "sendUserPresent", bouncerDoneHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(kvmCls, "keyguardDone", bouncerDoneHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(kvmCls, "handleKeyguardDone", bouncerDoneHook); } catch (Throwable ignored) {}
                 Log.e(TAG, "KeyguardViewMediator hooked for instant sleep/wake response!");
             } catch (Throwable t) {
                 Log.e(TAG, "KeyguardViewMediator hook check: " + t.getMessage());
@@ -599,6 +614,218 @@ public class XposedInit implements IXposedHookLoadPackage {
                         handleWakingUp();
                     }
                 });
+            } catch (Throwable ignored) {}
+
+            // Track Bouncer (PIN/password screen) state to instantly remove blur when bouncer is active
+            try {
+                Class<?> sysUiStateCls = cl.loadClass("com.android.systemui.model.SysUiState");
+                XposedBridge.hookAllConstructors(sysUiStateCls, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sSysUiState = param.thisObject;
+                    }
+                });
+                XposedBridge.hookAllMethods(sysUiStateCls, "setFlag", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sSysUiState = param.thisObject;
+                        if (param.args.length >= 2 && param.args[0] instanceof Long && param.args[1] instanceof Boolean) {
+                            long flag = (Long) param.args[0];
+                            boolean enabled = (Boolean) param.args[1];
+                            if ((flag & 8L) != 0) {
+                                Log.e(TAG, "SysUiState.setFlag(8L, " + enabled + ")");
+                                onBouncerShowingChanged(enabled);
+                            }
+                        }
+                    }
+                });
+                XposedBridge.hookAllMethods(sysUiStateCls, "commitUpdate", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sSysUiState = param.thisObject;
+                        try {
+                            long flags = (Long) XposedHelpers.callMethod(param.thisObject, "getFlags");
+                            boolean bouncer = (flags & 8L) != 0;
+                            if (bouncer != sBouncerShowing) {
+                                Log.e(TAG, "SysUiState.commitUpdate bouncer=" + bouncer);
+                                onBouncerShowingChanged(bouncer);
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                });
+            } catch (Throwable ignored) {}
+
+            try {
+                Class<?> scrimCls = cl.loadClass("com.android.systemui.statusbar.phone.ScrimController");
+                XposedBridge.hookAllMethods(scrimCls, "transitionTo", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args.length > 0 && param.args[0] != null) {
+                            String stateName = param.args[0].toString();
+                            if (stateName.contains("BOUNCER")) {
+                                Log.e(TAG, "ScrimController transitionTo BOUNCER: " + stateName);
+                                onBouncerShowingChanged(true);
+                            } else if (stateName.equals("KEYGUARD")) {
+                                Log.e(TAG, "ScrimController transitionTo KEYGUARD");
+                                onBouncerShowingChanged(false);
+                            }
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {}
+
+            try {
+                Class<?> skvmCls = cl.loadClass("com.android.systemui.statusbar.phone.StatusBarKeyguardViewManager");
+                XposedBridge.hookAllConstructors(skvmCls, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sStatusBarKeyguardViewManager = param.thisObject;
+                    }
+                });
+                XC_MethodHook bouncerShowHook = new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        Log.e(TAG, "StatusBarKeyguardViewManager show hook: " + param.method.getName());
+                        onBouncerShowingChanged(true);
+                    }
+                };
+                XC_MethodHook bouncerHideHook = new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        Log.e(TAG, "StatusBarKeyguardViewManager hide hook: " + param.method.getName());
+                        onBouncerShowingChanged(false);
+                    }
+                };
+                try { XposedBridge.hookAllMethods(skvmCls, "showPrimaryBouncer", bouncerShowHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(skvmCls, "showBouncer", bouncerShowHook); } catch (Throwable ignored) {}
+                try {
+                    XposedBridge.hookAllMethods(skvmCls, "showBouncerOrKeyguard", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            try {
+                                boolean b = (Boolean) XposedHelpers.callMethod(param.thisObject, "isBouncerShowing");
+                                onBouncerShowingChanged(b);
+                            } catch (Throwable ignored) {}
+                        }
+                    });
+                } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(skvmCls, "beginShowingBouncer", bouncerShowHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(skvmCls, "hideBouncer", bouncerHideHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(skvmCls, "hideAlternateBouncer", bouncerHideHook); } catch (Throwable ignored) {}
+                try {
+                    XposedBridge.hookAllMethods(skvmCls, "setBouncerShowing", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            if (param.args.length > 0 && param.args[0] instanceof Boolean) {
+                                onBouncerShowingChanged((Boolean) param.args[0]);
+                            }
+                        }
+                    });
+                } catch (Throwable ignored) {}
+                try {
+                    XposedBridge.hookAllMethods(skvmCls, "onBouncerVisibilityChanged", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            try {
+                                boolean b = (Boolean) XposedHelpers.callMethod(param.thisObject, "isBouncerShowing");
+                                onBouncerShowingChanged(b);
+                            } catch (Throwable ignored) {}
+                        }
+                    });
+                } catch (Throwable ignored) {}
+            } catch (Throwable ignored) {}
+
+            // Android 15 PrimaryBouncerInteractor & BouncerInteractor
+            try {
+                Class<?> pbiCls = cl.loadClass("com.android.systemui.bouncer.domain.interactor.PrimaryBouncerInteractor");
+                XposedBridge.hookAllConstructors(pbiCls, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sPrimaryBouncerInteractor = param.thisObject;
+                    }
+                });
+                XposedBridge.hookAllMethods(pbiCls, "show", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        Log.e(TAG, "PrimaryBouncerInteractor.show called!");
+                        onBouncerShowingChanged(true);
+                    }
+                });
+                XposedBridge.hookAllMethods(pbiCls, "hide", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        Log.e(TAG, "PrimaryBouncerInteractor.hide called!");
+                        onBouncerShowingChanged(false);
+                    }
+                });
+            } catch (Throwable ignored) {}
+
+            try {
+                Class<?> bouncerRepoCls = cl.loadClass("com.android.systemui.bouncer.data.repository.KeyguardBouncerRepositoryImpl");
+                XposedBridge.hookAllMethods(bouncerRepoCls, "setPrimaryShow", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        Log.e(TAG, "KeyguardBouncerRepositoryImpl.setPrimaryShow");
+                        onBouncerShowingChanged(true);
+                    }
+                });
+                XposedBridge.hookAllMethods(bouncerRepoCls, "setPrimaryStartingToHide", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        Log.e(TAG, "KeyguardBouncerRepositoryImpl.setPrimaryStartingToHide");
+                        onBouncerShowingChanged(false);
+                    }
+                });
+            } catch (Throwable ignored) {}
+
+            try {
+                Class<?> kscContainerCls = cl.loadClass("com.android.keyguard.KeyguardSecurityContainer");
+                XposedBridge.hookAllMethods(kscContainerCls, "setVisibility", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args.length > 0 && param.args[0] instanceof Integer) {
+                            int vis = (Integer) param.args[0];
+                            onBouncerShowingChanged(vis == View.VISIBLE);
+                        }
+                    }
+                });
+                XposedBridge.hookAllMethods(kscContainerCls, "onVisibilityAggregated", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args.length > 0 && param.args[0] instanceof Boolean) {
+                            onBouncerShowingChanged((Boolean) param.args[0]);
+                        }
+                    }
+                });
+                XposedBridge.hookAllMethods(kscContainerCls, "dispatchDraw", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        if (!sBouncerShowing) {
+                            onBouncerShowingChanged(true);
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {}
+
+            try {
+                Class<?> ksccCls = cl.loadClass("com.android.keyguard.KeyguardSecurityContainerController");
+                XC_MethodHook showBouncerHook = new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        onBouncerShowingChanged(true);
+                    }
+                };
+                try { XposedBridge.hookAllMethods(ksccCls, "show", showBouncerHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(ksccCls, "showPrimaryBouncer", showBouncerHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(ksccCls, "showBouncer", showBouncerHook); } catch (Throwable ignored) {}
+                try {
+                    XposedBridge.hookAllMethods(ksccCls, "hide", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            onBouncerShowingChanged(false);
+                        }
+                    });
+                } catch (Throwable ignored) {}
             } catch (Throwable ignored) {}
 
             // Track Status Bar State via StatusBarStateControllerImpl
@@ -713,6 +940,41 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
                     }
                 });
+                XposedBridge.hookAllMethods(nsslCls, "setAlpha", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sNsslView = (View) param.thisObject;
+                        if (param.args.length > 0 && param.args[0] instanceof Float) {
+                            float alpha = (Float) param.args[0];
+                            if (alpha < 0.05f) {
+                                if (!sBouncerShowing) {
+                                    Log.e(TAG, "NSSL.setAlpha=" + alpha + " -> onBouncerShowingChanged(true)");
+                                    onBouncerShowingChanged(true);
+                                }
+                            } else if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake) {
+                                if (sBouncerShowing) {
+                                    Log.e(TAG, "NSSL.setAlpha=" + alpha + " -> onBouncerShowingChanged(false)");
+                                    onBouncerShowingChanged(false);
+                                }
+                            }
+                        }
+                    }
+                });
+                XposedBridge.hookAllMethods(nsslCls, "setAlphaForLockscreenFadeIn", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sNsslView = (View) param.thisObject;
+                        if (param.args.length > 0 && param.args[0] instanceof Float) {
+                            float alpha = (Float) param.args[0];
+                            if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake) {
+                                if (sBouncerShowing) {
+                                    Log.e(TAG, "NSSL.setAlphaForLockscreenFadeIn=" + alpha + " -> onBouncerShowingChanged(false)");
+                                    onBouncerShowingChanged(false);
+                                }
+                            }
+                        }
+                    }
+                });
             } catch (Throwable ignored) {}
 
             Class<?> notifBgClass = cl.loadClass("com.android.systemui.statusbar.notification.row.NotificationBackgroundView");
@@ -759,6 +1021,14 @@ public class XposedInit implements IXposedHookLoadPackage {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                             onStatusBarStateChanged(sStatusBarState, 2);
+                        }
+                    });
+                } catch (Throwable ignored) {}
+                try {
+                    XposedBridge.hookAllMethods(csCls, "showBouncerOrUnlock", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            onBouncerShowingChanged(true);
                         }
                     });
                 } catch (Throwable ignored) {}
@@ -848,6 +1118,12 @@ public class XposedInit implements IXposedHookLoadPackage {
                             sNsslView = (View) vp;
                         }
                     }
+                    if (sRootWindowView == null) {
+                        try {
+                            View root = bgView.getRootView();
+                            if (root != null) sRootWindowView = root;
+                        } catch (Throwable ignored) {}
+                    }
 
                     // 2. Read live status bar & shade state directly from controller
                     if (sStatusBarStateController != null) {
@@ -868,11 +1144,23 @@ public class XposedInit implements IXposedHookLoadPackage {
                         } catch (Throwable ignored) {}
                     }
 
-                    // 3. Screen awake / Sleep / AOD check:
-                    // If device is going to sleep, sleeping, or on AOD:
+                    // 3. Screen awake / Sleep / AOD / Bouncer check:
+                    // If device is going to sleep, sleeping, on AOD, or Bouncer (PIN/password screen) is showing:
                     // Set blur radius to 0 and let stock background draw or fade cleanly without blur!
-                    if (!sScreenAwake) {
+                    float stackAlpha = 1.0f;
+                    if (sNsslView != null) {
+                        try { stackAlpha = sNsslView.getAlpha(); } catch (Throwable ignored) {}
+                    }
+                    float rowAlpha = 1.0f;
+                    if (parent != null) {
+                        try { rowAlpha = parent.getAlpha(); } catch (Throwable ignored) {}
+                    }
+                    if (stackAlpha < 0.05f && !sBouncerShowing) {
+                        onBouncerShowingChanged(true, "notifDrawHook-stackAlpha");
+                    }
+                    if (!sScreenAwake || sBouncerShowing || stackAlpha < 0.05f || rowAlpha < 0.05f) {
                         cleanupBlur(bgView);
+                        param.setResult(null);
                         return;
                     }
 
@@ -969,9 +1257,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                     // Only apply Frosted Glass Blur if:
                     // - On resting lockscreen (or Heads-Up pinned alert over apps)
                     // - AND NOT in Notification Shade
+                    // - AND NOT on Bouncer (PIN/password screen)
                     // - AND NOT expanded (user expanded / showing expanded / group expanded / child in group)
                     // - AND NOT colorized (media player with album art)
-                    boolean isTarget = (onKeyguard || isPinned) && !isExpanded && !isColorized;
+                    boolean isTarget = (onKeyguard || isPinned) && !isExpanded && !isColorized && !sBouncerShowing;
 
                     Canvas canvas = (Canvas) param.args[0];
                     if (canvas == null) return;
@@ -1295,7 +1584,7 @@ public class XposedInit implements IXposedHookLoadPackage {
         sStatusBarState = newState;
         if (newState == 0 || newState == 2) {
             clearAllNotificationBlurs();
-        } else if (newState == 1 && sScreenAwake) {
+        } else if (newState == 1 && sScreenAwake && !sBouncerShowing) {
             invalidateNotificationStack();
         }
     }
@@ -1304,9 +1593,25 @@ public class XposedInit implements IXposedHookLoadPackage {
         sLsToShadeProgress = progress;
         if (progress > 0.001f) {
             clearAllNotificationBlurs();
-        } else if (progress <= 0.0001f && sStatusBarState == 1 && sScreenAwake) {
+        } else if (progress <= 0.0001f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
             invalidateNotificationStack();
         }
+    }
+
+    private static void onBouncerShowingChanged(boolean showing, String reason) {
+        if (sBouncerShowing == showing) return;
+        sBouncerShowing = showing;
+        Log.e(TAG, "onBouncerShowingChanged: " + showing + " (" + reason + ")");
+        if (showing) {
+            clearAllNotificationBlurs();
+            invalidateNotificationStack();
+        } else if (sScreenAwake && sStatusBarState == 1) {
+            invalidateNotificationStack();
+        }
+    }
+
+    private static void onBouncerShowingChanged(boolean showing) {
+        onBouncerShowingChanged(showing, "unspecified");
     }
 
     private static void invalidateNotificationStack() {
@@ -1321,6 +1626,11 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
                     if (sNsslView != null) {
                         sNsslView.invalidate();
+                        View root = sNsslView.getRootView();
+                        if (root != null) root.invalidate();
+                    }
+                    if (sRootWindowView != null) {
+                        sRootWindowView.invalidate();
                     }
                 } catch (Throwable ignored) {}
             }
@@ -1355,7 +1665,14 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
                 }
                 if (sNsslView != null) {
-                    try { sNsslView.invalidate(); } catch (Throwable ignored) {}
+                    try {
+                        sNsslView.invalidate();
+                        View root = sNsslView.getRootView();
+                        if (root != null) root.invalidate();
+                    } catch (Throwable ignored) {}
+                }
+                if (sRootWindowView != null) {
+                    try { sRootWindowView.invalidate(); } catch (Throwable ignored) {}
                 }
             }
         };
@@ -1374,6 +1691,7 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     private static void handleWakingUp() {
         sScreenAwake = true;
+        sBouncerShowing = false;
 
         Runnable action = new Runnable() {
             @Override
@@ -1386,7 +1704,14 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
                 }
                 if (sNsslView != null) {
-                    try { sNsslView.invalidate(); } catch (Throwable ignored) {}
+                    try {
+                        sNsslView.invalidate();
+                        View root = sNsslView.getRootView();
+                        if (root != null) root.invalidate();
+                    } catch (Throwable ignored) {}
+                }
+                if (sRootWindowView != null) {
+                    try { sRootWindowView.invalidate(); } catch (Throwable ignored) {}
                 }
             }
         };
