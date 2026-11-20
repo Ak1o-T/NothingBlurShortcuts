@@ -15,6 +15,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.ViewParent;
 
 import java.lang.reflect.Constructor;
@@ -567,8 +568,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                 XC_MethodHook sleepKvmHook = new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        sScreenAwake = false;
-                        clearAllNotificationBlurs();
+                        handleGoingToSleep();
                     }
                 };
                 XC_MethodHook wakeKvmHook = new XC_MethodHook() {
@@ -579,8 +579,13 @@ public class XposedInit implements IXposedHookLoadPackage {
                 };
                 try { XposedBridge.hookAllMethods(kvmCls, "onStartedGoingToSleep", sleepKvmHook); } catch (Throwable ignored) {}
                 try { XposedBridge.hookAllMethods(kvmCls, "handleNotifyStartedGoingToSleep", sleepKvmHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(kvmCls, "onFinishedGoingToSleep", sleepKvmHook); } catch (Throwable ignored) {}
                 try { XposedBridge.hookAllMethods(kvmCls, "onStartedWakingUp", wakeKvmHook); } catch (Throwable ignored) {}
                 try { XposedBridge.hookAllMethods(kvmCls, "handleNotifyWakingUp", wakeKvmHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(kvmCls, "onScreenTurningOn", wakeKvmHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(kvmCls, "onScreenTurnedOn", wakeKvmHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(kvmCls, "onScreenTurningOff", sleepKvmHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(kvmCls, "onScreenTurnedOff", sleepKvmHook); } catch (Throwable ignored) {}
                 XC_MethodHook bouncerDoneHook = new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
@@ -597,36 +602,65 @@ public class XposedInit implements IXposedHookLoadPackage {
 
             try {
                 Class<?> kumCls = cl.loadClass("com.android.keyguard.KeyguardUpdateMonitor");
-                XposedBridge.hookAllMethods(kumCls, "dispatchStartedGoingToSleep", new XC_MethodHook() {
+                XC_MethodHook sleepKumHook = new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        sScreenAwake = false;
-                        clearAllNotificationBlurs();
+                        handleGoingToSleep();
                     }
-                });
-                XposedBridge.hookAllMethods(kumCls, "dispatchStartedWakingUp", new XC_MethodHook() {
+                };
+                XC_MethodHook wakeKumHook = new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         handleWakingUp();
                     }
-                });
+                };
+                try { XposedBridge.hookAllMethods(kumCls, "dispatchStartedGoingToSleep", sleepKumHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(kumCls, "dispatchFinishedGoingToSleep", sleepKumHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(kumCls, "dispatchStartedWakingUp", wakeKumHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(kumCls, "dispatchScreenTurningOn", wakeKumHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(kumCls, "dispatchScreenTurnedOn", wakeKumHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(kumCls, "dispatchScreenTurningOff", sleepKumHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(kumCls, "dispatchScreenTurnedOff", sleepKumHook); } catch (Throwable ignored) {}
             } catch (Throwable ignored) {}
 
             try {
                 Class<?> slCls = cl.loadClass("com.android.systemui.keyguard.ScreenLifecycle");
-                XposedBridge.hookAllMethods(slCls, "dispatchScreenTurningOff", new XC_MethodHook() {
+                XC_MethodHook sleepSlHook = new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        sScreenAwake = false;
-                        clearAllNotificationBlurs();
+                        handleGoingToSleep();
                     }
-                });
-                XposedBridge.hookAllMethods(slCls, "dispatchScreenTurningOn", new XC_MethodHook() {
+                };
+                XC_MethodHook wakeSlHook = new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         handleWakingUp();
                     }
-                });
+                };
+                try { XposedBridge.hookAllMethods(slCls, "dispatchScreenTurningOff", sleepSlHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(slCls, "dispatchScreenTurnedOff", sleepSlHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(slCls, "dispatchScreenTurningOn", wakeSlHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(slCls, "dispatchScreenTurnedOn", wakeSlHook); } catch (Throwable ignored) {}
+            } catch (Throwable ignored) {}
+
+            try {
+                Class<?> wlCls = cl.loadClass("com.android.systemui.keyguard.WakefulnessLifecycle");
+                XC_MethodHook sleepWlHook = new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        handleGoingToSleep();
+                    }
+                };
+                XC_MethodHook wakeWlHook = new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        handleWakingUp();
+                    }
+                };
+                try { XposedBridge.hookAllMethods(wlCls, "dispatchStartedGoingToSleep", sleepWlHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(wlCls, "dispatchFinishedGoingToSleep", sleepWlHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(wlCls, "dispatchStartedWakingUp", wakeWlHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(wlCls, "dispatchFinishedWakingUp", wakeWlHook); } catch (Throwable ignored) {}
             } catch (Throwable ignored) {}
 
             // Track Bouncer (PIN/password screen) state to instantly remove blur when bouncer is active
@@ -912,9 +946,15 @@ public class XposedInit implements IXposedHookLoadPackage {
                             float f = (Float) param.args[0];
                             sFractionToShade = f;
                             if (f > 0.20f) {
-                                clearAllNotificationBlurs();
+                                if (!sNotificationBlursCleared) {
+                                    sNotificationBlursCleared = true;
+                                    clearAllNotificationBlurs();
+                                }
                             } else if (f <= 0.05f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
-                                invalidateNotificationStack();
+                                if (sNotificationBlursCleared) {
+                                    sNotificationBlursCleared = false;
+                                    invalidateNotificationStack();
+                                }
                             }
                         }
                     }
@@ -955,8 +995,16 @@ public class XposedInit implements IXposedHookLoadPackage {
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
                             float f = (Float) param.args[0];
                             sFractionToShade = f;
-                            if (f > 0.001f) {
-                                clearAllNotificationBlurs();
+                            if (f > 0.20f) {
+                                if (!sNotificationBlursCleared) {
+                                    sNotificationBlursCleared = true;
+                                    clearAllNotificationBlurs();
+                                }
+                            } else if (f <= 0.05f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                                if (sNotificationBlursCleared) {
+                                    sNotificationBlursCleared = false;
+                                    invalidateNotificationStack();
+                                }
                             }
                         }
                     }
@@ -967,16 +1015,8 @@ public class XposedInit implements IXposedHookLoadPackage {
                         sNsslView = (View) param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
                             float alpha = (Float) param.args[0];
-                            if (alpha < 0.05f) {
-                                if (!sBouncerShowing) {
-                                    Log.e(TAG, "NSSL.setAlpha=" + alpha + " -> onBouncerShowingChanged(true)");
-                                    onBouncerShowingChanged(true);
-                                }
-                            } else if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake) {
-                                if (sBouncerShowing) {
-                                    Log.e(TAG, "NSSL.setAlpha=" + alpha + " -> onBouncerShowingChanged(false)");
-                                    onBouncerShowingChanged(false);
-                                }
+                            if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                                invalidateNotificationStack();
                             }
                         }
                     }
@@ -987,11 +1027,8 @@ public class XposedInit implements IXposedHookLoadPackage {
                         sNsslView = (View) param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
                             float alpha = (Float) param.args[0];
-                            if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake) {
-                                if (sBouncerShowing) {
-                                    Log.e(TAG, "NSSL.setAlphaForLockscreenFadeIn=" + alpha + " -> onBouncerShowingChanged(false)");
-                                    onBouncerShowingChanged(false);
-                                }
+                            if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                                invalidateNotificationStack();
                             }
                         }
                     }
@@ -1117,6 +1154,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                     View bgView = (View) param.thisObject;
+                    synchronized (sAllNotificationBackgrounds) {
+                        sAllNotificationBackgrounds.add(bgView);
+                    }
                     View parent = (View) bgView.getParent();
 
                     // 1. One-time caching of sStatusBarStateController & sAmbientState if not yet set
@@ -1182,9 +1222,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                     float rowAlpha = 1.0f;
                     if (parent != null) {
                         try { rowAlpha = parent.getAlpha(); } catch (Throwable ignored) {}
-                    }
-                    if (stackAlpha < 0.05f && !sBouncerShowing) {
-                        onBouncerShowingChanged(true, "notifDrawHook-stackAlpha");
                     }
                     if (!sScreenAwake || sBouncerShowing || stackAlpha < 0.05f || rowAlpha < 0.05f) {
                         cleanupBlur(bgView);
@@ -1614,41 +1651,83 @@ public class XposedInit implements IXposedHookLoadPackage {
         onBouncerShowingChanged(showing, "unspecified");
     }
 
-    private static void invalidateNotificationStack() {
-        Runnable r = new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    synchronized (sAllNotificationBackgrounds) {
-                        for (View bg : sAllNotificationBackgrounds) {
-                            if (bg != null) {
-                                bg.invalidate();
-                                ViewParent p = bg.getParent();
-                                if (p instanceof View) {
-                                    ((View) p).invalidate();
+    private static final Runnable sInvalidateNotificationStackRunnable = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                synchronized (sAllNotificationBackgrounds) {
+                    for (View bg : sAllNotificationBackgrounds) {
+                        if (bg != null) {
+                            bg.invalidate();
+                            ViewParent p = bg.getParent();
+                            if (p instanceof View) {
+                                ((View) p).invalidate();
+                            }
+                        }
+                    }
+                }
+                if (sNsslView != null) {
+                    sNsslView.invalidate();
+                    if (sNsslView instanceof ViewGroup) {
+                        ViewGroup vg = (ViewGroup) sNsslView;
+                        int count = vg.getChildCount();
+                        for (int i = 0; i < count; i++) {
+                            View child = vg.getChildAt(i);
+                            if (child != null) {
+                                child.invalidate();
+                                if (child instanceof ViewGroup) {
+                                    ViewGroup cvg = (ViewGroup) child;
+                                    for (int j = 0; j < cvg.getChildCount(); j++) {
+                                        View sub = cvg.getChildAt(j);
+                                        if (sub != null) sub.invalidate();
+                                    }
                                 }
                             }
                         }
                     }
-                    if (sNsslView != null) {
-                        sNsslView.invalidate();
-                        View root = sNsslView.getRootView();
-                        if (root != null) root.invalidate();
-                    }
-                    if (sRootWindowView != null) {
-                        sRootWindowView.invalidate();
-                    }
-                } catch (Throwable ignored) {}
-            }
-        };
+                    View root = sNsslView.getRootView();
+                    if (root != null) root.invalidate();
+                }
+                if (sRootWindowView != null) {
+                    sRootWindowView.invalidate();
+                }
+            } catch (Throwable ignored) {}
+        }
+    };
+
+    private static void invalidateNotificationStack() {
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            r.run();
+            sInvalidateNotificationStackRunnable.run();
         } else {
             Handler h = getMainHandler();
-            if (h != null) h.post(r);
-            else if (sNsslView != null) sNsslView.post(r);
+            if (h != null) h.post(sInvalidateNotificationStackRunnable);
+            else if (sNsslView != null) sNsslView.post(sInvalidateNotificationStackRunnable);
         }
     }
+
+    private static final Runnable sClearAllNotificationBlursRunnable = new Runnable() {
+        @Override
+        public void run() {
+            synchronized (sAllNotificationBackgrounds) {
+                for (View bgView : sAllNotificationBackgrounds) {
+                    cleanupBlur(bgView);
+                    if (bgView != null) {
+                        try { bgView.invalidate(); } catch (Throwable ignored) {}
+                    }
+                }
+            }
+            if (sNsslView != null) {
+                try {
+                    sNsslView.invalidate();
+                    View root = sNsslView.getRootView();
+                    if (root != null) root.invalidate();
+                } catch (Throwable ignored) {}
+            }
+            if (sRootWindowView != null) {
+                try { sRootWindowView.invalidate(); } catch (Throwable ignored) {}
+            }
+        }
+    };
 
     private static void clearAllNotificationBlurs() {
         // 1. Synchronously on current thread: immediately set blur radius to 0 and hide drawable (zero latency)
@@ -1659,78 +1738,59 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
 
         // 2. Schedule UI thread execution to invalidate views and force ViewRootImpl Aggregator to commit to SurfaceFlinger
-        Runnable action = new Runnable() {
-            @Override
-            public void run() {
-                synchronized (sAllNotificationBackgrounds) {
-                    for (View bgView : sAllNotificationBackgrounds) {
-                        cleanupBlur(bgView);
-                        if (bgView != null) {
-                            try { bgView.invalidate(); } catch (Throwable ignored) {}
-                        }
-                    }
-                }
-                if (sNsslView != null) {
-                    try {
-                        sNsslView.invalidate();
-                        View root = sNsslView.getRootView();
-                        if (root != null) root.invalidate();
-                    } catch (Throwable ignored) {}
-                }
-                if (sRootWindowView != null) {
-                    try { sRootWindowView.invalidate(); } catch (Throwable ignored) {}
-                }
-            }
-        };
-
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            action.run();
+            sClearAllNotificationBlursRunnable.run();
         } else {
             Handler h = getMainHandler();
             if (h != null) {
-                h.postAtFrontOfQueue(action);
+                h.postAtFrontOfQueue(sClearAllNotificationBlursRunnable);
             } else if (sNsslView != null) {
-                sNsslView.post(action);
+                sNsslView.post(sClearAllNotificationBlursRunnable);
             }
         }
     }
 
+    private static void handleGoingToSleep() {
+        sScreenAwake = false;
+        sBouncerShowing = false;
+        sNotificationBlursCleared = true;
+        sFractionToShade = 0f;
+        sLsToShadeProgress = 0f;
+        clearAllNotificationBlurs();
+    }
+
+    private static final Runnable sWakeInvalidateRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (sScreenAwake && !sBouncerShowing && sStatusBarState == 1) {
+                invalidateNotificationStack();
+            }
+        }
+    };
+
     private static void handleWakingUp() {
         sScreenAwake = true;
         sBouncerShowing = false;
+        sNotificationBlursCleared = false;
+        sFractionToShade = 0f;
+        sLsToShadeProgress = 0f;
 
-        Runnable action = new Runnable() {
-            @Override
-            public void run() {
-                synchronized (sAllNotificationBackgrounds) {
-                    for (View bgView : sAllNotificationBackgrounds) {
-                        if (bgView != null) {
-                            try { bgView.invalidate(); } catch (Throwable ignored) {}
-                        }
-                    }
+        if (sSysUiState != null) {
+            try {
+                long flags = (Long) XposedHelpers.callMethod(sSysUiState, "getFlags");
+                if ((flags & 8L) != 0) {
+                    sBouncerShowing = true;
                 }
-                if (sNsslView != null) {
-                    try {
-                        sNsslView.invalidate();
-                        View root = sNsslView.getRootView();
-                        if (root != null) root.invalidate();
-                    } catch (Throwable ignored) {}
-                }
-                if (sRootWindowView != null) {
-                    try { sRootWindowView.invalidate(); } catch (Throwable ignored) {}
-                }
-            }
-        };
+            } catch (Throwable ignored) {}
+        }
 
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            action.run();
-        } else {
-            Handler h = getMainHandler();
-            if (h != null) {
-                h.postAtFrontOfQueue(action);
-            } else if (sNsslView != null) {
-                sNsslView.post(action);
-            }
+        invalidateNotificationStack();
+
+        Handler h = getMainHandler();
+        if (h != null) {
+            h.postDelayed(sWakeInvalidateRunnable, 50);
+            h.postDelayed(sWakeInvalidateRunnable, 150);
+            h.postDelayed(sWakeInvalidateRunnable, 300);
         }
     }
 
