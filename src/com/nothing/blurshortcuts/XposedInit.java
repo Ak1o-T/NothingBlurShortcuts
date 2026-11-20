@@ -513,6 +513,31 @@ public class XposedInit implements IXposedHookLoadPackage {
 
         // 5. Hook Notifications for Lockscreen & Heads-Up Frosted Blur Style
         try {
+            // Instant sleep/wake response via KeyguardViewMediator
+            try {
+                Class<?> kvmCls = cl.loadClass("com.android.systemui.keyguard.KeyguardViewMediator");
+                XposedBridge.hookAllMethods(kvmCls, "onStartedGoingToSleep", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sIsDozing = true;
+                        sDozeAmount = 1.0f;
+                    }
+                });
+                XposedBridge.hookAllMethods(kvmCls, "onStartedWakingUp", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sIsDozing = false;
+                        sDozeAmount = 0.0f;
+                        if (sNsslView != null) {
+                            sNsslView.postInvalidate();
+                        }
+                    }
+                });
+                Log.e(TAG, "KeyguardViewMediator hooked for instant sleep/wake response!");
+            } catch (Throwable t) {
+                Log.e(TAG, "KeyguardViewMediator hook check: " + t.getMessage());
+            }
+
             // Track Status Bar State, Shade Expansion & Dozing via StatusBarStateControllerImpl
             try {
                 Class<?> sscCls = cl.loadClass("com.android.systemui.statusbar.StatusBarStateControllerImpl");
@@ -538,14 +563,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         if (param.args.length > 0 && param.args[0] instanceof Integer) {
                             sStatusBarState = (Integer) param.args[0];
-                        }
-                    }
-                });
-                XposedBridge.hookAllMethods(sscCls, "onShadeOrQsExpanded", new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        if (param.args.length > 0 && param.args[0] instanceof Boolean) {
-                            sIsShadeExpanded = (Boolean) param.args[0];
                         }
                     }
                 });
@@ -761,9 +778,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                         try {
                             sStatusBarState = (Integer) XposedHelpers.getObjectField(sStatusBarStateController, "mState");
                         } catch (Throwable ignored) {}
-                        try {
-                            sIsShadeExpanded = (Boolean) XposedHelpers.callMethod(sStatusBarStateController, "isExpanded");
-                        } catch (Throwable ignored) {}
                     }
 
                     if (sAmbientState != null) {
@@ -777,9 +791,9 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     // 3. AOD / Sleep check:
                     // If device is dozing or screen is off: cancel onDraw so standard solid card is NOT drawn!
-                    // Background stays completely clean and transparent on AOD without showing any white cards.
+                    // Background stays completely clean and transparent on AOD without showing any white cards or lingering blur.
                     // DO NOT call cleanupBlur here so mBackgroundBlurDrawable stays attached and ready for instant wake-up.
-                    if (sIsDozing || sDozeAmount >= 0.99f) {
+                    if (sIsDozing || sDozeAmount >= 0.95f) {
                         param.setResult(null);
                         return;
                     }
@@ -787,7 +801,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                     int state = sStatusBarState;
                     float lsToShade = sLsToShadeProgress;
                     float fractionToShade = sFractionToShade;
-                    boolean isShadeExpanded = sIsShadeExpanded;
 
                     // 4. Fast direct method invocation on parent row
                     boolean isPinned = false;
@@ -826,8 +839,8 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     // 5. Target determination:
                     // State: 1 = KEYGUARD, 0 = SHADE, 2 = SHADE_LOCKED
-                    // When shade menu is opened over lockscreen, state transitions to 2 or lsToShade > 0.05f or fractionToShade > 0.05f or isShadeExpanded is true.
-                    boolean isShadeOrMenu = (state != 1) || isShadeExpanded || (lsToShade > 0.05f) || (fractionToShade > 0.05f);
+                    // When shade menu is opened over lockscreen, state transitions to 2 (SHADE_LOCKED), or lsToShade > 0.05f, or fractionToShade > 0.05f.
+                    boolean isShadeOrMenu = (state != 1) || (lsToShade > 0.05f) || (fractionToShade > 0.05f);
 
                     // Lockscreen notifications (cards & shelf) ONLY when resting cleanly on lockscreen (state == 1)
                     boolean isLockscreenTarget = (state == 1)
@@ -835,11 +848,11 @@ public class XposedInit implements IXposedHookLoadPackage {
                             && !isUserExpanded;
 
                     // Heads-up incoming pop-up notifications over active apps (state == 0 and actively pinned banner)
-                    boolean isHeadsUpTarget = (state == 0) && isPinned && !isShadeExpanded;
+                    boolean isHeadsUpTarget = (state == 0) && isPinned && (lsToShade <= 0.05f) && (fractionToShade <= 0.05f);
 
                     boolean isTarget = (isLockscreenTarget || isHeadsUpTarget) && !isColorized;
                     if (!isTarget) {
-                        if (state != 1 || isShadeOrMenu || isUserExpanded) {
+                        if (state != 1 || lsToShade > 0.05f || fractionToShade > 0.05f || isUserExpanded) {
                             cleanupBlur(bgView);
                         }
                         return;
@@ -947,9 +960,16 @@ public class XposedInit implements IXposedHookLoadPackage {
                         } catch (Throwable ignored) {}
                     }
 
+                    float fade = Math.max(0.0f, Math.min(1.0f, 1.0f - sDozeAmount));
+                    int blurRadius = Math.max(1, Math.round(160 * fade));
+                    int tintBase = isDark ? 0x44 : 0x38;
+                    int borderBase = isDark ? 0x28 : 0x45;
+                    int tintAlpha = Math.round(tintBase * fade);
+                    int borderAlpha = Math.round(borderBase * fade);
+
                     if (blurDrawable != null) {
                         try {
-                            XposedHelpers.callMethod(blurDrawable, "setBlurRadius", 160);
+                            XposedHelpers.callMethod(blurDrawable, "setBlurRadius", blurRadius);
                         } catch (Throwable ignored) {}
                         try {
                             XposedHelpers.callMethod(blurDrawable, "setCornerRadius", topRadius, topRadius, bottomRadius, bottomRadius);
@@ -965,11 +985,11 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     // 2. Frosted Glass Tint & Specular Rim
                     if (isDark) {
-                        glassTintPaint.setColor(0x44000000);
-                        glassBorderPaint.setColor(0x28FFFFFF);
+                        glassTintPaint.setColor((tintAlpha << 24));
+                        glassBorderPaint.setColor((borderAlpha << 24) | 0x00FFFFFF);
                     } else {
-                        glassTintPaint.setColor(0x38FFFFFF);
-                        glassBorderPaint.setColor(0x45FFFFFF);
+                        glassTintPaint.setColor((tintAlpha << 24) | 0x00FFFFFF);
+                        glassBorderPaint.setColor((borderAlpha << 24) | 0x00FFFFFF);
                     }
 
                     canvas.drawPath(sClipPath, glassTintPaint);
