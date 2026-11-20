@@ -1,0 +1,4 @@
+bin/classes/
+bin/dex/
+bin/compiled_res/
+bin/*.idsig
