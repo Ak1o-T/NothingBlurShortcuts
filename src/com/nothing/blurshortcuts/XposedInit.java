@@ -46,6 +46,12 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static Drawable rightDrawable;
     private static volatile int lastUiMode = -1;
 
+    // Status Bar & Shade State tracking
+    private static volatile Object sStatusBarStateController = null;
+    private static volatile int sStatusBarState = 1; // 1 = KEYGUARD, 0 = SHADE, 2 = SHADE_LOCKED
+    private static volatile boolean sIsShadeExpanded = false;
+    private static volatile boolean sInitialized = false;
+
     private static final Paint glassTintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint glassBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
@@ -82,7 +88,13 @@ public class XposedInit implements IXposedHookLoadPackage {
     }
 
     private static synchronized void initSystemUI(ClassLoader cl) {
-        if (cl == null) return;
+        if (cl == null || sInitialized) return;
+        try {
+            cl.loadClass("com.android.systemui.statusbar.notification.row.NotificationBackgroundView");
+            sInitialized = true;
+        } catch (Throwable ignored) {
+            return;
+        }
 
         // 1. Enable SystemUI Lockscreen Blur Feature Flags
         try {
@@ -467,6 +479,73 @@ public class XposedInit implements IXposedHookLoadPackage {
 
         // 5. Hook Notifications for Lockscreen & Heads-Up Frosted Blur Style
         try {
+            // Track Status Bar State and Shade Expansion via StatusBarStateControllerImpl
+            try {
+                Class<?> sscCls = cl.loadClass("com.android.systemui.statusbar.StatusBarStateControllerImpl");
+                XposedBridge.hookAllConstructors(sscCls, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sStatusBarStateController = param.thisObject;
+                        try {
+                            sStatusBarState = (Integer) XposedHelpers.getObjectField(param.thisObject, "mState");
+                        } catch (Throwable ignored) {}
+                    }
+                });
+                XposedBridge.hookAllMethods(sscCls, "setState", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args.length > 0 && param.args[0] instanceof Integer) {
+                            sStatusBarState = (Integer) param.args[0];
+                        }
+                    }
+                });
+                XposedBridge.hookAllMethods(sscCls, "onStatusBarStateChanged", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args.length > 0 && param.args[0] instanceof Integer) {
+                            sStatusBarState = (Integer) param.args[0];
+                        }
+                    }
+                });
+                XposedBridge.hookAllMethods(sscCls, "onShadeOrQsExpanded", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args.length > 0 && param.args[0] instanceof Boolean) {
+                            sIsShadeExpanded = (Boolean) param.args[0];
+                        }
+                    }
+                });
+                XposedBridge.hookAllMethods(sscCls, "setPanelExpanded", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args.length > 0 && param.args[0] instanceof Boolean) {
+                            sIsShadeExpanded = (Boolean) param.args[0];
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {}
+
+            // Track state via AmbientState
+            try {
+                Class<?> asCls = cl.loadClass("com.android.systemui.statusbar.notification.stack.AmbientState");
+                XposedBridge.hookAllMethods(asCls, "setStatusBarState", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args.length > 0 && param.args[0] instanceof Integer) {
+                            sStatusBarState = (Integer) param.args[0];
+                        }
+                    }
+                });
+                XposedBridge.hookAllMethods(asCls, "setShadeExpanded", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args.length > 0 && param.args[0] instanceof Boolean) {
+                            sIsShadeExpanded = (Boolean) param.args[0];
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {}
+
             Class<?> notifBgClass = cl.loadClass("com.android.systemui.statusbar.notification.row.NotificationBackgroundView");
             Class<?> notifRowClass = cl.loadClass("com.android.systemui.statusbar.notification.row.ExpandableNotificationRow");
             Class<?> notifShelfClass = null;
@@ -475,41 +554,83 @@ public class XposedInit implements IXposedHookLoadPackage {
             } catch (Throwable ignored) {}
 
             final Class<?> shelfCls = notifShelfClass;
-            Log.e(TAG, "Found NotificationBackgroundView: " + notifBgClass + ", ExpandableNotificationRow: " + notifRowClass + ", Shelf: " + shelfCls);
 
-            XposedBridge.hookAllMethods(notifBgClass, "onDraw", new XC_MethodHook() {
+            if (shelfCls != null) {
+                try {
+                    XposedBridge.hookAllMethods(shelfCls, "setStatusBarState", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            if (param.args.length > 0 && param.args[0] instanceof Integer) {
+                                sStatusBarState = (Integer) param.args[0];
+                            }
+                        }
+                    });
+                } catch (Throwable ignored) {}
+            }
+
+            XC_MethodHook notifDrawHook = new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                     View bgView = (View) param.thisObject;
-                    boolean onKeyguard = false;
-                    try {
-                        onKeyguard = (Boolean) XposedHelpers.getObjectField(bgView, "mOnKeyguard");
-                    } catch (Throwable ignored) {}
+                    View parent = (View) bgView.getParent();
+
+                    if (sStatusBarStateController == null && bgView.getContext() != null) {
+                        try {
+                            ClassLoader bcl = bgView.getContext().getClassLoader();
+                            Class<?> depCls = bcl.loadClass("com.android.systemui.Dependency");
+                            Class<?> sscInterface = bcl.loadClass("com.android.systemui.plugins.statusbar.StatusBarStateController");
+                            sStatusBarStateController = XposedHelpers.callStaticMethod(depCls, "get", sscInterface);
+                            Log.e(TAG, "Lazily retrieved sStatusBarStateController: " + sStatusBarStateController);
+                        } catch (Throwable t) {
+                            Log.e(TAG, "Failed lazy retrieval of sStatusBarStateController: " + t);
+                        }
+                    }
+
+                    int currentState = sStatusBarState;
+                    boolean isShadeExpanded = sIsShadeExpanded;
+                    if (sStatusBarStateController != null) {
+                        try {
+                            currentState = (Integer) XposedHelpers.callMethod(sStatusBarStateController, "getState");
+                            sStatusBarState = currentState;
+                        } catch (Throwable t1) {
+                            try {
+                                currentState = (Integer) XposedHelpers.getObjectField(sStatusBarStateController, "mState");
+                                sStatusBarState = currentState;
+                            } catch (Throwable ignored) {}
+                        }
+                        try {
+                            isShadeExpanded = (Boolean) XposedHelpers.callMethod(sStatusBarStateController, "isExpanded");
+                            sIsShadeExpanded = isShadeExpanded;
+                        } catch (Throwable ignored) {}
+                    }
 
                     boolean isHeadsUp = false;
                     boolean isPinned = false;
                     boolean isColorized = false;
                     boolean isShelf = false;
-                    boolean isShelfKeyguard = false;
+                    boolean onKeyguard = false;
+                    boolean rowOnKeyguard = false;
 
-                    View parent = (View) bgView.getParent();
+                    try { onKeyguard = (Boolean) XposedHelpers.getObjectField(bgView, "mOnKeyguard"); } catch (Throwable ignored) {}
 
                     if (parent != null && notifRowClass.isAssignableFrom(parent.getClass())) {
                         try { isHeadsUp = (Boolean) XposedHelpers.callMethod(parent, "isHeadsUp"); } catch (Throwable ignored) {}
                         try { isPinned = (Boolean) XposedHelpers.callMethod(parent, "isPinned"); } catch (Throwable ignored) {}
                         try { isColorized = (Boolean) XposedHelpers.callMethod(parent, "isColorized"); } catch (Throwable ignored) {}
+                        try { rowOnKeyguard = (Boolean) XposedHelpers.callMethod(parent, "isOnKeyguard"); } catch (Throwable ignored) {}
                     } else if (parent != null && shelfCls != null && shelfCls.isAssignableFrom(parent.getClass())) {
                         isShelf = true;
-                        try {
-                            int statusBarState = (Integer) XposedHelpers.getObjectField(parent, "mStatusBarState");
-                            // StatusBarState: 1 = KEYGUARD, 0 = SHADE, 2 = SHADE_LOCKED
-                            isShelfKeyguard = (statusBarState == 1);
-                        } catch (Throwable ignored) {}
                     }
 
-                    // Only style Lockscreen notifications (cards & shelf on keyguard) and Heads-Up (pop-up) notifications!
-                    // Notification shade/menu notifications remain untouched as requested.
-                    boolean isTarget = (onKeyguard || isHeadsUp || isPinned || isShelfKeyguard) && !isColorized;
+                    // 1. Lockscreen notifications (cards & shelf) ONLY when resting on lockscreen (currentState == 1 / KEYGUARD).
+                    // When the user swipes down into the notifications menu, currentState transitions to 2 (SHADE_LOCKED),
+                    // so notifications in that menu remain completely ordinary / stock (no blur, no transparency)!
+                    boolean isLockscreenTarget = (currentState == 1) && !isShadeExpanded;
+
+                    // 2. Heads-up incoming pop-up notifications over active apps (currentState == 0 / SHADE and not expanded into menu):
+                    boolean isHeadsUpTarget = (currentState == 0) && (isHeadsUp || isPinned) && !isShadeExpanded;
+
+                    boolean isTarget = (isLockscreenTarget || isHeadsUpTarget) && !isColorized;
                     if (!isTarget) {
                         return;
                     }
@@ -538,6 +659,8 @@ public class XposedInit implements IXposedHookLoadPackage {
                         if (right <= 0) right = bgView.getWidth();
                         if (bottom <= 0) bottom = bgView.getHeight();
                     }
+
+                    if (right <= left || bottom <= top) return;
 
                     int clipTop = 0;
                     try { clipTop = (Integer) XposedHelpers.getObjectField(bgView, "mClipTopAmount"); } catch (Throwable ignored) {}
@@ -631,7 +754,15 @@ public class XposedInit implements IXposedHookLoadPackage {
                     // Cancel original onDraw so solid plate is not drawn
                     param.setResult(null);
                 }
-            });
+            };
+
+            XposedBridge.hookAllMethods(notifBgClass, "onDraw", notifDrawHook);
+            try {
+                Class<?> notifShelfBgClass = cl.loadClass("com.android.systemui.statusbar.notification.shelf.NotificationShelfBackgroundView");
+                if (notifShelfBgClass != null && notifShelfBgClass != notifBgClass) {
+                    XposedBridge.hookAllMethods(notifShelfBgClass, "onDraw", notifDrawHook);
+                }
+            } catch (Throwable ignored) {}
             Log.e(TAG, "NotificationBackgroundView hooked for frosted glass blur style!");
         } catch (Throwable t) {
             Log.e(TAG, "Notification hooks check: " + t.getMessage());
