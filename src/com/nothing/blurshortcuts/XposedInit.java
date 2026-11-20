@@ -584,42 +584,6 @@ public class XposedInit implements IXposedHookLoadPackage {
             }
 
             try {
-                Class<?> soacCls = cl.loadClass("com.android.systemui.statusbar.phone.ScreenOffAnimationController");
-                XC_MethodHook screenOffHook = new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        sIsDozing = true;
-                        sGoingToSleep = true;
-                        sWakingUp = false;
-                        sDozeAmount = 1.0f;
-                        clearAllNotificationBlurs();
-                    }
-                };
-                try { XposedBridge.hookAllMethods(soacCls, "onStartedGoingToSleep", screenOffHook); } catch (Throwable ignored) {}
-                try { XposedBridge.hookAllMethods(soacCls, "startAnimation", screenOffHook); } catch (Throwable ignored) {}
-            } catch (Throwable ignored) {}
-
-            try {
-                Class<?> dozeCls = cl.loadClass("com.android.systemui.doze.DozeService");
-                XposedBridge.hookAllMethods(dozeCls, "onDreamingStarted", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        sIsDozing = true;
-                        sGoingToSleep = true;
-                        sWakingUp = false;
-                        sDozeAmount = 1.0f;
-                        clearAllNotificationBlurs();
-                    }
-                });
-                XposedBridge.hookAllMethods(dozeCls, "onDreamingStopped", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        handleWakingUp();
-                    }
-                });
-            } catch (Throwable ignored) {}
-
-            try {
                 Class<?> kumCls = cl.loadClass("com.android.keyguard.KeyguardUpdateMonitor");
                 XposedBridge.hookAllMethods(kumCls, "dispatchStartedWakingUp", new XC_MethodHook() {
                     @Override
@@ -684,19 +648,21 @@ public class XposedInit implements IXposedHookLoadPackage {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         sStatusBarStateController = param.thisObject;
+                        float amt = 0.0f;
                         try {
-                            sDozeAmount = (Float) XposedHelpers.getObjectField(param.thisObject, "mDozeAmount");
+                            amt = (Float) XposedHelpers.getObjectField(param.thisObject, "mDozeAmount");
                         } catch (Throwable t) {
-                            sDozeAmount = 0.0f;
+                            amt = 0.0f;
                         }
-                        try {
-                            sIsDozing = (Boolean) XposedHelpers.getObjectField(param.thisObject, "mIsDozing");
-                        } catch (Throwable ignored) {}
+                        sDozeAmount = amt;
                         sGoingToSleep = false;
-                        if (sIsDozing) {
+                        if (amt > 0.5f) {
+                            sIsDozing = true;
                             clearAllNotificationBlurs();
                         } else {
-                            handleWakingUp();
+                            sIsDozing = false;
+                            sWakingUp = false;
+                            invalidateNotificationStack();
                         }
                     }
                 });
@@ -1075,9 +1041,6 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     if (blurDrawable != null) {
                         try {
-                            ((Drawable) blurDrawable).setVisible(true, false);
-                        } catch (Throwable ignored) {}
-                        try {
                             XposedHelpers.callMethod(blurDrawable, "setBlurRadius", 160);
                         } catch (Throwable ignored) {}
                         try {
@@ -1319,36 +1282,13 @@ public class XposedInit implements IXposedHookLoadPackage {
         sWakingUp = true;
         sDozeAmount = 0.0f;
 
-        // 1. Synchronously on current thread: immediately re-enable blur in all drawables (zero latency)
-        synchronized (sAllNotificationBackgrounds) {
-            for (View bgView : sAllNotificationBackgrounds) {
-                if (bgView != null) {
-                    try {
-                        Object bd = XposedHelpers.getObjectField(bgView, "mBackgroundBlurDrawable");
-                        if (bd != null) {
-                            try { ((Drawable) bd).setVisible(true, false); } catch (Throwable ignored) {}
-                            try { XposedHelpers.callMethod(bd, "setBlurRadius", 160); } catch (Throwable ignored) {}
-                        }
-                    } catch (Throwable ignored) {}
-                }
-            }
-        }
-
-        // 2. Schedule UI thread execution to invalidate views and force immediate redraw
         Runnable action = new Runnable() {
             @Override
             public void run() {
                 synchronized (sAllNotificationBackgrounds) {
                     for (View bgView : sAllNotificationBackgrounds) {
                         if (bgView != null) {
-                            try {
-                                Object bd = XposedHelpers.getObjectField(bgView, "mBackgroundBlurDrawable");
-                                if (bd != null) {
-                                    try { ((Drawable) bd).setVisible(true, false); } catch (Throwable ignored) {}
-                                    try { XposedHelpers.callMethod(bd, "setBlurRadius", 160); } catch (Throwable ignored) {}
-                                }
-                                bgView.invalidate();
-                            } catch (Throwable ignored) {}
+                            try { bgView.invalidate(); } catch (Throwable ignored) {}
                         }
                     }
                 }
@@ -1378,9 +1318,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                 try {
                     XposedHelpers.callMethod(bd, "setBlurRadius", 0);
                 } catch (Throwable ignored) {}
-                try {
-                    ((Drawable) bd).setVisible(false, false);
-                } catch (Throwable ignored) {}
+                XposedHelpers.setObjectField(bgView, "mBackgroundBlurDrawable", null);
             }
         } catch (Throwable ignored) {}
     }
