@@ -86,11 +86,19 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static final float[] sCornerRadii = new float[8];
 
     // Pre-reflected fast methods for notification rows
+    private static Method sIsOnKeyguardMethod = null;
     private static Method sIsUserExpandedMethod = null;
+    private static Method sIsShowingExpandedMethod = null;
+    private static Method sIsGroupExpandedMethod = null;
+    private static Method sHasUserChangedExpansionMethod = null;
+    private static Method sIsExpandedMethod = null;
+    private static Method sAreChildrenExpandedMethod = null;
+    private static Method sIsChildInGroupMethod = null;
     private static Method sIsPinnedMethod = null;
     private static Method sIsColorizedMethod = null;
     private static Method sGetTopCornerRadiusMethod = null;
     private static Method sGetBottomCornerRadiusMethod = null;
+    private static Method sShelfIsOnKeyguardMethod = null;
 
     private static final Paint glassTintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint glassBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -607,7 +615,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         if (param.args.length > 0 && param.args[0] instanceof Integer) {
-                            sStatusBarState = (Integer) param.args[0];
+                            onStatusBarStateChanged(sStatusBarState, (Integer) param.args[0]);
                         }
                     }
                 });
@@ -615,7 +623,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         if (param.args.length > 0 && param.args[0] instanceof Integer) {
-                            sStatusBarState = (Integer) param.args[0];
+                            onStatusBarStateChanged(sStatusBarState, (Integer) param.args[0]);
                         }
                     }
                 });
@@ -635,7 +643,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         sAmbientState = param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Integer) {
-                            sStatusBarState = (Integer) param.args[0];
+                            onStatusBarStateChanged(sStatusBarState, (Integer) param.args[0]);
                         }
                     }
                 });
@@ -644,7 +652,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         sAmbientState = param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
-                            sLsToShadeProgress = (Float) param.args[0];
+                            onLsToShadeProgressChanged((Float) param.args[0]);
                         }
                     }
                 });
@@ -653,7 +661,11 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         sAmbientState = param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
-                            sFractionToShade = (Float) param.args[0];
+                            float f = (Float) param.args[0];
+                            sFractionToShade = f;
+                            if (f > 0.001f) {
+                                clearAllNotificationBlurs();
+                            }
                         }
                     }
                 });
@@ -673,7 +685,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         sNsslView = (View) param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Integer) {
-                            sStatusBarState = (Integer) param.args[0];
+                            onStatusBarStateChanged(sStatusBarState, (Integer) param.args[0]);
                         }
                     }
                 });
@@ -682,7 +694,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         sNsslView = (View) param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
-                            sLsToShadeProgress = (Float) param.args[0];
+                            onLsToShadeProgressChanged((Float) param.args[0]);
                         }
                     }
                 });
@@ -691,7 +703,11 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         sNsslView = (View) param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
-                            sFractionToShade = (Float) param.args[0];
+                            float f = (Float) param.args[0];
+                            sFractionToShade = f;
+                            if (f > 0.001f) {
+                                clearAllNotificationBlurs();
+                            }
                         }
                     }
                 });
@@ -712,19 +728,92 @@ public class XposedInit implements IXposedHookLoadPackage {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                             if (param.args.length > 0 && param.args[0] instanceof Integer) {
-                                sStatusBarState = (Integer) param.args[0];
+                                onStatusBarStateChanged(sStatusBarState, (Integer) param.args[0]);
                             }
                         }
                     });
                 } catch (Throwable ignored) {}
+                try { sShelfIsOnKeyguardMethod = shelfCls.getMethod("isOnKeyguard"); sShelfIsOnKeyguardMethod.setAccessible(true); } catch (Throwable ignored) {}
             }
 
+            try {
+                Class<?> csCls = cl.loadClass("com.android.systemui.statusbar.phone.CentralSurfacesImpl");
+                XposedBridge.hookAllMethods(csCls, "setBarState", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args.length > 0 && param.args[0] instanceof Integer) {
+                            onStatusBarStateChanged(sStatusBarState, (Integer) param.args[0]);
+                        }
+                    }
+                });
+                XposedBridge.hookAllMethods(csCls, "goToLockedShade", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        onStatusBarStateChanged(sStatusBarState, 2);
+                    }
+                });
+                try {
+                    XposedBridge.hookAllMethods(csCls, "goToLockedShadeFromKeyguard", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            onStatusBarStateChanged(sStatusBarState, 2);
+                        }
+                    });
+                } catch (Throwable ignored) {}
+            } catch (Throwable ignored) {}
+
+            try {
+                Class<?> nsslControllerCls = cl.loadClass("com.android.systemui.statusbar.notification.stack.NotificationStackScrollLayoutController");
+                XposedBridge.hookAllMethods(nsslControllerCls, "setStatusBarState", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args.length > 0 && param.args[0] instanceof Integer) {
+                            onStatusBarStateChanged(sStatusBarState, (Integer) param.args[0]);
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {}
+
             // Pre-reflect methods on ExpandableNotificationRow for maximum 120 FPS performance
+            try { sIsOnKeyguardMethod = notifRowClass.getMethod("isOnKeyguard"); sIsOnKeyguardMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sIsUserExpandedMethod = notifRowClass.getMethod("isUserExpanded"); sIsUserExpandedMethod.setAccessible(true); } catch (Throwable ignored) {}
+            try { sIsShowingExpandedMethod = notifRowClass.getMethod("isShowingExpanded"); sIsShowingExpandedMethod.setAccessible(true); } catch (Throwable ignored) {}
+            try { sIsGroupExpandedMethod = notifRowClass.getMethod("isGroupExpanded"); sIsGroupExpandedMethod.setAccessible(true); } catch (Throwable ignored) {}
+            try { sHasUserChangedExpansionMethod = notifRowClass.getMethod("hasUserChangedExpansion"); sHasUserChangedExpansionMethod.setAccessible(true); } catch (Throwable ignored) {}
+            try { sIsExpandedMethod = notifRowClass.getMethod("isExpanded"); sIsExpandedMethod.setAccessible(true); } catch (Throwable ignored) {}
+            try { sAreChildrenExpandedMethod = notifRowClass.getMethod("areChildrenExpanded"); sAreChildrenExpandedMethod.setAccessible(true); } catch (Throwable ignored) {}
+            try { sIsChildInGroupMethod = notifRowClass.getMethod("isChildInGroup"); sIsChildInGroupMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sIsPinnedMethod = notifRowClass.getMethod("isPinned"); sIsPinnedMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sIsColorizedMethod = notifRowClass.getMethod("isColorized"); sIsColorizedMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sGetTopCornerRadiusMethod = notifRowClass.getMethod("getTopCornerRadius"); sGetTopCornerRadiusMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sGetBottomCornerRadiusMethod = notifRowClass.getMethod("getBottomCornerRadius"); sGetBottomCornerRadiusMethod.setAccessible(true); } catch (Throwable ignored) {}
+
+            XC_MethodHook rowExpansionHook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    View row = (View) param.thisObject;
+                    if (row != null) {
+                        try {
+                            View bgNormal = (View) XposedHelpers.getObjectField(row, "mBackgroundNormal");
+                            if (bgNormal != null) {
+                                cleanupBlur(bgNormal);
+                                bgNormal.invalidate();
+                            }
+                        } catch (Throwable ignored) {}
+                        try {
+                            View bgDimmed = (View) XposedHelpers.getObjectField(row, "mBackgroundDimmed");
+                            if (bgDimmed != null) {
+                                cleanupBlur(bgDimmed);
+                                bgDimmed.invalidate();
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                }
+            };
+            try { XposedBridge.hookAllMethods(notifRowClass, "setUserExpanded", rowExpansionHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "setShowingExpanded", rowExpansionHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "setGroupExpanded", rowExpansionHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "onExpansionChanged", rowExpansionHook); } catch (Throwable ignored) {}
 
             XC_MethodHook notifDrawHook = new XC_MethodHook() {
                 @Override
@@ -761,7 +850,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                     // 2. Read live status bar & shade state directly from controller
                     if (sStatusBarStateController != null) {
                         try {
-                            sStatusBarState = (Integer) XposedHelpers.getObjectField(sStatusBarStateController, "mState");
+                            int st = (Integer) XposedHelpers.getObjectField(sStatusBarStateController, "mState");
+                            if (sStatusBarState != st) {
+                                onStatusBarStateChanged(sStatusBarState, st);
+                            }
                         } catch (Throwable ignored) {}
                     }
 
@@ -782,47 +874,102 @@ public class XposedInit implements IXposedHookLoadPackage {
                         return;
                     }
 
-                    int state = sStatusBarState;
-                    float lsToShade = sLsToShadeProgress;
-                    float fractionToShade = sFractionToShade;
-
                     // 4. Fast direct method invocation on parent row
+                    boolean onKeyguard = false;
                     boolean isPinned = false;
                     boolean isColorized = false;
-                    boolean isUserExpanded = false;
+                    boolean isExpanded = false;
                     boolean isShelf = false;
 
                     if (parent != null && notifRowClass.isAssignableFrom(parent.getClass())) {
+                        if (sIsOnKeyguardMethod != null) {
+                            try { onKeyguard = (Boolean) sIsOnKeyguardMethod.invoke(parent); } catch (Throwable ignored) {}
+                        } else {
+                            try { onKeyguard = (Boolean) XposedHelpers.callMethod(parent, "isOnKeyguard"); } catch (Throwable ignored) {}
+                        }
+
                         if (sIsPinnedMethod != null) {
                             try { isPinned = (Boolean) sIsPinnedMethod.invoke(parent); } catch (Throwable ignored) {}
                         } else {
                             try { isPinned = (Boolean) XposedHelpers.callMethod(parent, "isPinned"); } catch (Throwable ignored) {}
                         }
+
                         if (sIsColorizedMethod != null) {
                             try { isColorized = (Boolean) sIsColorizedMethod.invoke(parent); } catch (Throwable ignored) {}
                         } else {
                             try { isColorized = (Boolean) XposedHelpers.callMethod(parent, "isColorized"); } catch (Throwable ignored) {}
                         }
+
+                        boolean userExp = false;
                         if (sIsUserExpandedMethod != null) {
-                            try { isUserExpanded = (Boolean) sIsUserExpandedMethod.invoke(parent); } catch (Throwable ignored) {}
+                            try { userExp = (Boolean) sIsUserExpandedMethod.invoke(parent); } catch (Throwable ignored) {}
                         } else {
-                            try { isUserExpanded = (Boolean) XposedHelpers.callMethod(parent, "isUserExpanded"); } catch (Throwable ignored) {}
+                            try { userExp = (Boolean) XposedHelpers.callMethod(parent, "isUserExpanded"); } catch (Throwable ignored) {}
                         }
+
+                        boolean showingExp = false;
+                        if (sIsShowingExpandedMethod != null) {
+                            try { showingExp = (Boolean) sIsShowingExpandedMethod.invoke(parent); } catch (Throwable ignored) {}
+                        } else {
+                            try { showingExp = (Boolean) XposedHelpers.callMethod(parent, "isShowingExpanded"); } catch (Throwable ignored) {}
+                        }
+
+                        boolean groupExp = false;
+                        if (sIsGroupExpandedMethod != null) {
+                            try { groupExp = (Boolean) sIsGroupExpandedMethod.invoke(parent); } catch (Throwable ignored) {}
+                        } else {
+                            try { groupExp = (Boolean) XposedHelpers.callMethod(parent, "isGroupExpanded"); } catch (Throwable ignored) {}
+                        }
+
+                        boolean userChanged = false;
+                        if (sHasUserChangedExpansionMethod != null) {
+                            try { userChanged = (Boolean) sHasUserChangedExpansionMethod.invoke(parent); } catch (Throwable ignored) {}
+                        } else {
+                            try { userChanged = (Boolean) XposedHelpers.callMethod(parent, "hasUserChangedExpansion"); } catch (Throwable ignored) {}
+                        }
+
+                        boolean isExp = false;
+                        if (sIsExpandedMethod != null) {
+                            try { isExp = (Boolean) sIsExpandedMethod.invoke(parent); } catch (Throwable ignored) {}
+                        }
+
+                        boolean childrenExp = false;
+                        if (sAreChildrenExpandedMethod != null) {
+                            try { childrenExp = (Boolean) sAreChildrenExpandedMethod.invoke(parent); } catch (Throwable ignored) {}
+                        }
+
+                        boolean isChild = false;
+                        if (sIsChildInGroupMethod != null) {
+                            try { isChild = (Boolean) sIsChildInGroupMethod.invoke(parent); } catch (Throwable ignored) {}
+                        }
+
+                        isExpanded = userExp || showingExp || groupExp || userChanged || isExp || childrenExp || isChild;
+
                     } else if (parent != null && shelfCls != null && shelfCls.isAssignableFrom(parent.getClass())) {
                         isShelf = true;
+                        if (sShelfIsOnKeyguardMethod != null) {
+                            try { onKeyguard = (Boolean) sShelfIsOnKeyguardMethod.invoke(parent); } catch (Throwable ignored) {}
+                        } else {
+                            try { onKeyguard = (Boolean) XposedHelpers.callMethod(parent, "isOnKeyguard"); } catch (Throwable ignored) {}
+                        }
                     }
 
-                    // 5. Target determination:
-                    // State: 1 = KEYGUARD, 0 = SHADE, 2 = SHADE_LOCKED
-                    // In Shade Menu:
-                    // - From lockscreen: state == 2 (SHADE_LOCKED) or during pulldown (lsToShade > 0.05f or fractionToShade > 0.05f)
-                    // - From desktop: state == 0 (SHADE) when not pinned
-                    // In Shade Menu, all notifications must be 100% classic stock notifications!
-                    boolean isShadeMenu = (state == 2) || (state == 0 && !isPinned) || (lsToShade > 0.05f) || (fractionToShade > 0.05f);
+                    // 5. Shade state & progress verification:
+                    // If in Shade (pulled down or on desktop): forced off keyguard
+                    int state = sStatusBarState;
+                    float lsToShade = sLsToShadeProgress;
+                    float fractionToShade = sFractionToShade;
+                    if (state == 2 || state == 0 || lsToShade > 0.001f || fractionToShade > 0.001f) {
+                        onKeyguard = false;
+                    }
 
-                    // On resting lockscreen (state == 1) or Heads-Up over apps (state == 0 && isPinned):
-                    // Apply frosted glass blur!
-                    boolean isTarget = !isShadeMenu && !isUserExpanded && !isColorized;
+                    // 6. Target determination:
+                    // Only apply Frosted Glass Blur if:
+                    // - On resting lockscreen (or Heads-Up pinned alert over apps)
+                    // - AND NOT in Notification Shade
+                    // - AND NOT expanded (user expanded / showing expanded / group expanded / child in group)
+                    // - AND NOT colorized (media player with album art)
+                    boolean isTarget = (onKeyguard || isPinned) && !isExpanded && !isColorized;
                     if (!isTarget) {
                         cleanupBlur(bgView);
                         return;
@@ -931,6 +1078,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
 
                     if (blurDrawable != null) {
+                        try {
+                            ((Drawable) blurDrawable).setVisible(true, false);
+                        } catch (Throwable ignored) {}
                         try {
                             XposedHelpers.callMethod(blurDrawable, "setBlurRadius", 160);
                         } catch (Throwable ignored) {}
@@ -1104,6 +1254,24 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
     }
 
+    private static void onStatusBarStateChanged(int oldState, int newState) {
+        sStatusBarState = newState;
+        if (newState == 0 || newState == 2) {
+            clearAllNotificationBlurs();
+        } else if (newState == 1 && sScreenAwake) {
+            invalidateNotificationStack();
+        }
+    }
+
+    private static void onLsToShadeProgressChanged(float progress) {
+        sLsToShadeProgress = progress;
+        if (progress > 0.001f) {
+            clearAllNotificationBlurs();
+        } else if (progress <= 0.0001f && sStatusBarState == 1 && sScreenAwake) {
+            invalidateNotificationStack();
+        }
+    }
+
     private static void invalidateNotificationStack() {
         Runnable r = new Runnable() {
             @Override
@@ -1205,6 +1373,9 @@ public class XposedInit implements IXposedHookLoadPackage {
             if (bd != null) {
                 try {
                     XposedHelpers.callMethod(bd, "setBlurRadius", 0);
+                } catch (Throwable ignored) {}
+                try {
+                    ((Drawable) bd).setVisible(false, false);
                 } catch (Throwable ignored) {}
             }
         } catch (Throwable ignored) {}
