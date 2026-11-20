@@ -677,43 +677,67 @@ public class XposedInit implements IXposedHookLoadPackage {
             } catch (Throwable ignored) {}
 
             // Track Bouncer (PIN/password screen) state to instantly remove blur when bouncer is active
-            try {
-                Class<?> sysUiStateCls = cl.loadClass("com.android.systemui.model.SysUiState");
-                XposedBridge.hookAllConstructors(sysUiStateCls, new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        sSysUiState = param.thisObject;
-                    }
-                });
-                XposedBridge.hookAllMethods(sysUiStateCls, "setFlag", new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        sSysUiState = param.thisObject;
-                        if (param.args.length >= 2 && param.args[0] instanceof Long && param.args[1] instanceof Boolean) {
-                            long flag = (Long) param.args[0];
-                            boolean enabled = (Boolean) param.args[1];
-                            if ((flag & 8L) != 0) {
-                                Log.e(TAG, "SysUiState.setFlag(8L, " + enabled + ")");
-                                onBouncerShowingChanged(enabled);
+            String[] sysUiStateClassNames = {
+                "com.android.systemui.model.SysUiStateImpl",
+                "com.android.systemui.model.SysUiState"
+            };
+            for (String clsName : sysUiStateClassNames) {
+                try {
+                    Class<?> targetCls = cl.loadClass(clsName);
+                    XposedBridge.hookAllConstructors(targetCls, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            sSysUiState = param.thisObject;
+                            Log.e(TAG, "SysUiState constructor captured: " + param.thisObject.getClass().getName());
+                        }
+                    });
+                    XposedBridge.hookAllMethods(targetCls, "setFlag", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            sSysUiState = param.thisObject;
+                            if (param.args.length >= 2 && param.args[0] instanceof Long && param.args[1] instanceof Boolean) {
+                                long flag = (Long) param.args[0];
+                                boolean enabled = (Boolean) param.args[1];
+                                if ((flag & 8L) != 0) {
+                                    Log.e(TAG, "SysUiState.setFlag(8L, " + enabled + ")");
+                                    onBouncerShowingChanged(enabled, "SysUiState.setFlag");
+                                }
                             }
                         }
-                    }
-                });
-                XposedBridge.hookAllMethods(sysUiStateCls, "commitUpdate", new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        sSysUiState = param.thisObject;
-                        try {
-                            long flags = (Long) XposedHelpers.callMethod(param.thisObject, "getFlags");
-                            boolean bouncer = (flags & 8L) != 0;
-                            if (bouncer != sBouncerShowing) {
-                                Log.e(TAG, "SysUiState.commitUpdate bouncer=" + bouncer);
-                                onBouncerShowingChanged(bouncer);
+                    });
+                    XposedBridge.hookAllMethods(targetCls, "commitUpdate", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            sSysUiState = param.thisObject;
+                            try {
+                                long flags = (Long) XposedHelpers.callMethod(param.thisObject, "getFlags");
+                                boolean bouncer = (flags & 8L) != 0;
+                                if (bouncer != sBouncerShowing) {
+                                    Log.e(TAG, "SysUiState.commitUpdate bouncer=" + bouncer);
+                                    onBouncerShowingChanged(bouncer, "SysUiState.commitUpdate");
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+                    });
+                    try {
+                        XposedBridge.hookAllMethods(targetCls, "notifyAndSetSystemUiStateChanged", new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                                sSysUiState = param.thisObject;
+                                if (param.args.length >= 2 && param.args[0] instanceof Long && param.args[1] instanceof Long) {
+                                    long oldFlags = (Long) param.args[0];
+                                    long newFlags = (Long) param.args[1];
+                                    if ((oldFlags & 8L) != (newFlags & 8L)) {
+                                        boolean bouncer = (newFlags & 8L) != 0;
+                                        Log.e(TAG, "notifyAndSetSystemUiStateChanged bouncer=" + bouncer);
+                                        onBouncerShowingChanged(bouncer, "notifyAndSetSystemUiStateChanged");
+                                    }
+                                }
                             }
-                        } catch (Throwable ignored) {}
-                    }
-                });
-            } catch (Throwable ignored) {}
+                        });
+                    } catch (Throwable ignored) {}
+                } catch (Throwable ignored) {}
+            }
 
             try {
                 Class<?> scrimCls = cl.loadClass("com.android.systemui.statusbar.phone.ScrimController");
@@ -1028,7 +1052,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                         sNsslView = (View) param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
                             float alpha = (Float) param.args[0];
-                            if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                            if (alpha < 0.05f && sScreenAwake) {
+                                clearAllNotificationBlurs();
+                            } else if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
                                 invalidateNotificationStack();
                             }
                         }
@@ -1040,7 +1066,53 @@ public class XposedInit implements IXposedHookLoadPackage {
                         sNsslView = (View) param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
                             float alpha = (Float) param.args[0];
-                            if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                            if (alpha < 0.05f && sScreenAwake) {
+                                clearAllNotificationBlurs();
+                            } else if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                                invalidateNotificationStack();
+                            }
+                        }
+                    }
+                });
+                XposedBridge.hookAllMethods(nsslCls, "setVisibility", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sNsslView = (View) param.thisObject;
+                        if (param.args.length > 0 && param.args[0] instanceof Integer) {
+                            int vis = (Integer) param.args[0];
+                            if (vis != View.VISIBLE && sScreenAwake) {
+                                clearAllNotificationBlurs();
+                            } else if (vis == View.VISIBLE && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                                invalidateNotificationStack();
+                            }
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {}
+
+            try {
+                Class<?> sncCls = cl.loadClass("com.android.systemui.statusbar.notification.stack.ui.view.SharedNotificationContainer");
+                XposedBridge.hookAllMethods(sncCls, "setAlpha", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args.length > 0 && param.args[0] instanceof Float) {
+                            float alpha = (Float) param.args[0];
+                            if (alpha < 0.05f && sScreenAwake) {
+                                clearAllNotificationBlurs();
+                            } else if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                                invalidateNotificationStack();
+                            }
+                        }
+                    }
+                });
+                XposedBridge.hookAllMethods(sncCls, "setVisibility", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args.length > 0 && param.args[0] instanceof Integer) {
+                            int vis = (Integer) param.args[0];
+                            if (vis != View.VISIBLE && sScreenAwake) {
+                                clearAllNotificationBlurs();
+                            } else if (vis == View.VISIBLE && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
                                 invalidateNotificationStack();
                             }
                         }
@@ -1210,6 +1282,16 @@ public class XposedInit implements IXposedHookLoadPackage {
                             int st = sStateField.getInt(sStatusBarStateController);
                             if (sStatusBarState != st) {
                                 onStatusBarStateChanged(sStatusBarState, st);
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+
+                    if (sSysUiState != null) {
+                        try {
+                            long flags = (Long) XposedHelpers.callMethod(sSysUiState, "getFlags");
+                            boolean bouncer = (flags & 8L) != 0;
+                            if (bouncer != sBouncerShowing) {
+                                onBouncerShowingChanged(bouncer, "notifDrawHook.liveCheck");
                             }
                         } catch (Throwable ignored) {}
                     }
@@ -1395,6 +1477,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                                         blurDrawable = sCreateBackgroundBlurDrawableMethod.invoke(vri);
                                     } else {
                                         blurDrawable = XposedHelpers.callMethod(vri, "createBackgroundBlurDrawable");
+                                    }
+                                    if (blurDrawable instanceof Drawable) {
+                                        ((Drawable) blurDrawable).setCallback(bgView);
                                     }
                                     if (sBackgroundBlurDrawableField != null) {
                                         sBackgroundBlurDrawableField.set(bgView, blurDrawable);
@@ -1659,6 +1744,12 @@ public class XposedInit implements IXposedHookLoadPackage {
             invalidateNotificationStack();
         } else if (sScreenAwake && sStatusBarState == 1) {
             invalidateNotificationStack();
+            Handler h = getMainHandler();
+            if (h != null) {
+                h.postDelayed(sWakeInvalidateRunnable, 50);
+                h.postDelayed(sWakeInvalidateRunnable, 150);
+                h.postDelayed(sWakeInvalidateRunnable, 300);
+            }
         }
     }
 
@@ -1727,7 +1818,11 @@ public class XposedInit implements IXposedHookLoadPackage {
                 for (View bgView : sAllNotificationBackgrounds) {
                     cleanupBlur(bgView);
                     if (bgView != null) {
-                        try { bgView.invalidate(); } catch (Throwable ignored) {}
+                        try {
+                            bgView.invalidate();
+                            View root = bgView.getRootView();
+                            if (root != null) root.invalidate();
+                        } catch (Throwable ignored) {}
                     }
                 }
             }
@@ -1767,7 +1862,6 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     private static void handleGoingToSleep() {
         sScreenAwake = false;
-        sBouncerShowing = false;
         sNotificationBlursCleared = true;
         sFractionToShade = 0f;
         sLsToShadeProgress = 0f;
@@ -1777,6 +1871,16 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static final Runnable sWakeInvalidateRunnable = new Runnable() {
         @Override
         public void run() {
+            if (sSysUiState != null) {
+                try {
+                    long flags = (Long) XposedHelpers.callMethod(sSysUiState, "getFlags");
+                    if ((flags & 8L) != 0) {
+                        sBouncerShowing = true;
+                        clearAllNotificationBlurs();
+                        return;
+                    }
+                } catch (Throwable ignored) {}
+            }
             if (sScreenAwake && !sBouncerShowing && sStatusBarState == 1) {
                 invalidateNotificationStack();
             }
@@ -1785,7 +1889,6 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     private static void handleWakingUp() {
         sScreenAwake = true;
-        sBouncerShowing = false;
         sNotificationBlursCleared = false;
         sFractionToShade = 0f;
         sLsToShadeProgress = 0f;
@@ -1793,10 +1896,13 @@ public class XposedInit implements IXposedHookLoadPackage {
         if (sSysUiState != null) {
             try {
                 long flags = (Long) XposedHelpers.callMethod(sSysUiState, "getFlags");
-                if ((flags & 8L) != 0) {
-                    sBouncerShowing = true;
-                }
+                sBouncerShowing = ((flags & 8L) != 0);
             } catch (Throwable ignored) {}
+        }
+
+        if (sBouncerShowing) {
+            clearAllNotificationBlurs();
+            return;
         }
 
         invalidateNotificationStack();
