@@ -2,6 +2,7 @@ package com.nothing.blurshortcuts;
 
 import android.app.Application;
 import android.content.Context;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Matrix;
@@ -42,17 +43,15 @@ public class XposedInit implements IXposedHookLoadPackage {
     // Cache drawables per shortcut slot
     private static Drawable leftDrawable;
     private static Drawable rightDrawable;
+    private static volatile int lastUiMode = -1;
 
     private static final Paint glassTintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint glassBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     static {
         glassTintPaint.setStyle(Paint.Style.FILL);
-        glassTintPaint.setColor(0x38FFFFFF); // Authentic Nothing OS lockscreen widget frosted glass tint
-
         glassBorderPaint.setStyle(Paint.Style.STROKE);
         glassBorderPaint.setStrokeWidth(2.0f); // 2px crisp specular border
-        glassBorderPaint.setColor(0x45FFFFFF); // Specular outline rim
     }
 
     @Override
@@ -169,7 +168,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                 Log.e(TAG, "BackgroundKt hook error: " + t);
             }
 
-            // Hook shortcutBackground directly
+            // Hook shortcutBackground directly as a second line of defense
             for (Method m : shortcutProviderClass.getDeclaredMethods()) {
                 if (m.getName().equals("shortcutBackground")) {
                     try {
@@ -228,9 +227,38 @@ public class XposedInit implements IXposedHookLoadPackage {
                                     Canvas nativeCanvas = getNativeCanvas(composeCanvas);
 
                                     if (nativeCanvas == null) {
-                                        param.setResult(null); // Cancel original method anyway
+                                        param.setResult(null);
                                         return;
                                     }
+
+                                    // Context & UI Theme Mode (Light vs Dark) detection
+                                    Context ctx = null;
+                                    try {
+                                        ctx = (Context) XposedHelpers.callStaticMethod(
+                                            XposedHelpers.findClass("android.app.ActivityThread", null),
+                                            "currentApplication"
+                                        );
+                                    } catch (Throwable ignored) {}
+
+                                    int currentUiMode = Configuration.UI_MODE_NIGHT_NO;
+                                    if (ctx != null) {
+                                        currentUiMode = ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+                                    }
+                                    boolean isDark = (currentUiMode == Configuration.UI_MODE_NIGHT_YES);
+
+                                    // Respond to theme change in real-time
+                                    if (lastUiMode != -1 && lastUiMode != currentUiMode) {
+                                        Log.e(TAG, "Theme mode changed to " + (isDark ? "DARK" : "LIGHT") + "! Updating drawables.");
+                                        if (onThemeChangedMethod != null) {
+                                            try {
+                                                if (leftDrawable != null) onThemeChangedMethod.invoke(leftDrawable);
+                                                if (rightDrawable != null) onThemeChangedMethod.invoke(rightDrawable);
+                                            } catch (Throwable ignored) {}
+                                        }
+                                        leftDrawable = null;
+                                        rightDrawable = null;
+                                    }
+                                    lastUiMode = currentUiMode;
 
                                     long sizeBits = (Long) XposedHelpers.callMethod(drawScope, "getSize-NH-jbRc");
                                     float width = Float.intBitsToFloat((int) (sizeBits >> 32));
@@ -273,12 +301,8 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                                     // Get or create FrostedBackdropDrawable per slot
                                     Drawable frosted = isLeftSlot ? leftDrawable : rightDrawable;
-                                    if (frosted == null && backdropProvider != null && drawableClass != null) {
+                                    if (frosted == null && backdropProvider != null && drawableClass != null && ctx != null) {
                                         try {
-                                            Context ctx = (Context) XposedHelpers.callStaticMethod(
-                                                XposedHelpers.findClass("android.app.ActivityThread", null),
-                                                "currentApplication"
-                                            );
                                             frosted = (Drawable) XposedHelpers.newInstance(drawableClass, ctx, backdropProvider);
                                             if (frosted != null) {
                                                 frosted.setCallback(null);
@@ -288,12 +312,15 @@ public class XposedInit implements IXposedHookLoadPackage {
                                                 if (completeTransitionNowMethod != null) {
                                                     completeTransitionNowMethod.invoke(frosted);
                                                 }
+                                                if (onThemeChangedMethod != null) {
+                                                    onThemeChangedMethod.invoke(frosted);
+                                                }
                                                 if (isLeftSlot) {
                                                     leftDrawable = frosted;
                                                 } else {
                                                     rightDrawable = frosted;
                                                 }
-                                                Log.e(TAG, "Created FrostedBackdropDrawable for slot: " + (isLeftSlot ? "LEFT" : "RIGHT"));
+                                                Log.e(TAG, "Created FrostedBackdropDrawable for slot: " + (isLeftSlot ? "LEFT" : "RIGHT") + " (isDark=" + isDark + ")");
                                             }
                                         } catch (Throwable t) {
                                             Log.e(TAG, "Failed creating FrostedBackdropDrawable: " + t);
@@ -312,15 +339,24 @@ public class XposedInit implements IXposedHookLoadPackage {
                                         frosted.draw(nativeCanvas);
                                     }
 
-                                    // 2. Render Widget-style frosted glass plate overlay (translucent fill + specular rim)
+                                    // 2. Render Widget-style frosted glass plate overlay dynamically adapted to Dark/Light theme
+                                    if (isDark) {
+                                        // Dark theme: translucent smoked glass overlay + subtle specular edge rim
+                                        glassTintPaint.setColor(0x44000000);
+                                        glassBorderPaint.setColor(0x28FFFFFF);
+                                    } else {
+                                        // Light theme: translucent milky white glass overlay + specular edge rim
+                                        glassTintPaint.setColor(0x38FFFFFF);
+                                        glassBorderPaint.setColor(0x45FFFFFF);
+                                    }
+
                                     nativeCanvas.drawCircle(cx, cy, radius, glassTintPaint);
                                     nativeCanvas.drawCircle(cx, cy, radius - 1.0f, glassBorderPaint);
 
                                 } catch (Throwable t) {
                                     Log.e(TAG, "Error in drawBlurBehind lambda: " + t, t);
                                 } finally {
-                                    // CANCEL the original method so AOSP's BackgroundBlurDrawable
-                                    // does NOT draw any solid opaque plate over our glass!
+                                    // CANCEL original method so BackgroundBlurDrawable does not draw opaque plate
                                     param.setResult(null);
                                 }
                             }
