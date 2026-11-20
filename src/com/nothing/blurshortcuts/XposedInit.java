@@ -13,6 +13,7 @@ import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
 import android.util.Log;
 import android.view.View;
+import android.view.ViewParent;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
@@ -48,6 +49,7 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     // Status Bar & Shade State tracking
     private static volatile Object sStatusBarStateController = null;
+    private static volatile Object sAmbientState = null;
     private static volatile int sStatusBarState = 1; // 1 = KEYGUARD, 0 = SHADE, 2 = SHADE_LOCKED
     private static volatile boolean sIsShadeExpanded = false;
     private static volatile boolean sInitialized = false;
@@ -110,11 +112,11 @@ public class XposedInit implements IXposedHookLoadPackage {
             XposedBridge.hookAllMethods(flagsClass, "blurOnMoreSurfaces", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    param.setResult(true);
+                    param.setResult(false);
                 }
             });
 
-            Log.e(TAG, "Successfully enabled Flags.enableLockscreenBlur & blurOnMoreSurfaces!");
+            Log.e(TAG, "Successfully enabled Flags.enableLockscreenBlur & disabled blurOnMoreSurfaces!");
         } catch (Throwable t) {
             Log.e(TAG, "Flags hook check: " + t.getMessage());
         }
@@ -528,6 +530,12 @@ public class XposedInit implements IXposedHookLoadPackage {
             // Track state via AmbientState
             try {
                 Class<?> asCls = cl.loadClass("com.android.systemui.statusbar.notification.stack.AmbientState");
+                XposedBridge.hookAllConstructors(asCls, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sAmbientState = param.thisObject;
+                    }
+                });
                 XposedBridge.hookAllMethods(asCls, "setStatusBarState", new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
@@ -586,8 +594,25 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
                     }
 
+                    if (sAmbientState == null && parent != null) {
+                        View v = parent;
+                        while (v != null) {
+                            try {
+                                Object as = XposedHelpers.getObjectField(v, "mAmbientState");
+                                if (as != null) {
+                                    sAmbientState = as;
+                                    break;
+                                }
+                            } catch (Throwable ignored) {}
+                            ViewParent vp = v.getParent();
+                            v = (vp instanceof View) ? (View) vp : null;
+                        }
+                    }
+
                     int currentState = sStatusBarState;
                     boolean isShadeExpanded = sIsShadeExpanded;
+                    float lsToShade = 0.0f;
+
                     if (sStatusBarStateController != null) {
                         try {
                             currentState = (Integer) XposedHelpers.callMethod(sStatusBarStateController, "getState");
@@ -604,7 +629,23 @@ public class XposedInit implements IXposedHookLoadPackage {
                         } catch (Throwable ignored) {}
                     }
 
-                    boolean isHeadsUp = false;
+                    if (sAmbientState != null) {
+                        try {
+                            lsToShade = (Float) XposedHelpers.getObjectField(sAmbientState, "mLStoShadeProgress");
+                        } catch (Throwable ignored) {}
+                        try {
+                            Object asState = XposedHelpers.getObjectField(sAmbientState, "mStatusBarState");
+                            if (asState instanceof Integer) {
+                                currentState = (Integer) asState;
+                            } else if (asState != null) {
+                                String str = asState.toString();
+                                if ("KEYGUARD".equals(str)) currentState = 1;
+                                else if ("SHADE_LOCKED".equals(str)) currentState = 2;
+                                else if ("SHADE".equals(str)) currentState = 0;
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+
                     boolean isPinned = false;
                     boolean isColorized = false;
                     boolean isShelf = false;
@@ -614,7 +655,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                     try { onKeyguard = (Boolean) XposedHelpers.getObjectField(bgView, "mOnKeyguard"); } catch (Throwable ignored) {}
 
                     if (parent != null && notifRowClass.isAssignableFrom(parent.getClass())) {
-                        try { isHeadsUp = (Boolean) XposedHelpers.callMethod(parent, "isHeadsUp"); } catch (Throwable ignored) {}
                         try { isPinned = (Boolean) XposedHelpers.callMethod(parent, "isPinned"); } catch (Throwable ignored) {}
                         try { isColorized = (Boolean) XposedHelpers.callMethod(parent, "isColorized"); } catch (Throwable ignored) {}
                         try { rowOnKeyguard = (Boolean) XposedHelpers.callMethod(parent, "isOnKeyguard"); } catch (Throwable ignored) {}
@@ -623,15 +663,23 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
 
                     // 1. Lockscreen notifications (cards & shelf) ONLY when resting on lockscreen (currentState == 1 / KEYGUARD).
-                    // When the user swipes down into the notifications menu, currentState transitions to 2 (SHADE_LOCKED),
-                    // so notifications in that menu remain completely ordinary / stock (no blur, no transparency)!
-                    boolean isLockscreenTarget = (currentState == 1) && !isShadeExpanded;
+                    // When the user swipes down into the notifications menu, currentState transitions to 2 (SHADE_LOCKED)
+                    // or lsToShade > 0.05f, so notifications in that menu remain completely ordinary / stock (no blur, no transparency)!
+                    boolean isLockscreenTarget = (currentState == 1) && (onKeyguard || rowOnKeyguard || isShelf) && (lsToShade <= 0.05f) && !isShadeExpanded;
 
-                    // 2. Heads-up incoming pop-up notifications over active apps (currentState == 0 / SHADE and not expanded into menu):
-                    boolean isHeadsUpTarget = (currentState == 0) && (isHeadsUp || isPinned) && !isShadeExpanded;
+                    // 2. Heads-up incoming pop-up notifications over active apps (currentState == 0 / SHADE and actively pinned floating banner, not in shade menu):
+                    boolean isHeadsUpTarget = (currentState == 0) && isPinned && !isShadeExpanded;
 
                     boolean isTarget = (isLockscreenTarget || isHeadsUpTarget) && !isColorized;
                     if (!isTarget) {
+                        // Crucial: deactivate and clear any previously attached blur drawable so AOSP draws stock plate with zero blur!
+                        try {
+                            Object bd = XposedHelpers.getObjectField(bgView, "mBackgroundBlurDrawable");
+                            if (bd != null) {
+                                XposedHelpers.callMethod(bd, "setBlurRadius", 0);
+                                XposedHelpers.setObjectField(bgView, "mBackgroundBlurDrawable", null);
+                            }
+                        } catch (Throwable ignored) {}
                         return;
                     }
 
@@ -693,6 +741,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
 
                     if (blurDrawable != null) {
+                        try {
+                            XposedHelpers.callMethod(blurDrawable, "setBlurRadius", 160);
+                        } catch (Throwable ignored) {}
                         Drawable bd = (Drawable) blurDrawable;
                         bd.setBounds(left, top, right, bottom);
                         if (radii != null && radii.length >= 8) {
