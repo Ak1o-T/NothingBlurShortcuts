@@ -1783,6 +1783,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                                     private float lastAlpha = Float.NaN;
                                     private float lastScaleX = Float.NaN;
                                     private float lastScaleY = Float.NaN;
+                                    private int lastH = -1;
+                                    private int lastClipTop = -1;
+                                    private int lastClipBottom = -1;
 
                                     @Override
                                     public boolean onPreDraw() {
@@ -1811,19 +1814,42 @@ public class XposedInit implements IXposedHookLoadPackage {
                                         float sx = rowView.getScaleX();
                                         float sy = rowView.getScaleY();
 
+                                        int h = 0;
+                                        if (sGetActualHeightMethod != null) {
+                                            try { h = (Integer) sGetActualHeightMethod.invoke(rowView); } catch (Throwable ignored) {}
+                                        } else {
+                                            try { h = (Integer) XposedHelpers.callMethod(rowView, "getActualHeight"); } catch (Throwable ignored) {}
+                                        }
+                                        if (h <= 0 && sActualHeightField != null) {
+                                            try { h = sActualHeightField.getInt(bgV); } catch (Throwable ignored) {}
+                                        }
+
+                                        int clipT = 0;
+                                        if (sClipTopAmountField != null) {
+                                            try { clipT = sClipTopAmountField.getInt(bgV); } catch (Throwable ignored) {}
+                                        }
+                                        int clipB = 0;
+                                        if (sClipBottomAmountField != null) {
+                                            try { clipB = sClipBottomAmountField.getInt(bgV); } catch (Throwable ignored) {}
+                                        }
+
                                         boolean animatingAway = false;
                                         if (sIsHeadsUpAnimatingAwayMethod != null) {
                                             try { animatingAway = (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(rowView); } catch (Throwable ignored) {}
                                         }
 
                                         boolean isMoving = animatingAway || y != 0f || x != 0f || a < 0.99f || sx != 1f || sy != 1f
-                                                || y != lastY || x != lastX || a != lastAlpha || sx != lastScaleX || sy != lastScaleY;
+                                                || y != lastY || x != lastX || a != lastAlpha || sx != lastScaleX || sy != lastScaleY
+                                                || h != lastH || clipT != lastClipTop || clipB != lastClipBottom;
 
                                         lastY = y;
                                         lastX = x;
                                         lastAlpha = a;
                                         lastScaleX = sx;
                                         lastScaleY = sy;
+                                        lastH = h;
+                                        lastClipTop = clipT;
+                                        lastClipBottom = clipB;
 
                                         if (isMoving) {
                                             bgV.invalidate();
@@ -1947,23 +1973,17 @@ public class XposedInit implements IXposedHookLoadPackage {
                     if (actualWidth <= 0) actualWidth = bgView.getWidth();
 
                     int actualHeight = 0;
-                    if (sActualHeightField != null) {
-                        try { actualHeight = sActualHeightField.getInt(bgView); } catch (Throwable ignored) {}
-                    }
                     if (row != null) {
                         try {
                             int rh = (sGetActualHeightMethod != null) ? (Integer) sGetActualHeightMethod.invoke(row)
                                     : (Integer) XposedHelpers.callMethod(row, "getActualHeight");
-                            boolean animatingAway = false;
-                            if (sIsHeadsUpAnimatingAwayMethod != null) {
-                                try { animatingAway = (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(row); } catch (Throwable ignored) {}
-                            }
-                            if (!animatingAway && rh > actualHeight) {
-                                actualHeight = rh;
-                            } else if (actualHeight <= 0) {
+                            if (rh > 0) {
                                 actualHeight = rh;
                             }
                         } catch (Throwable ignored) {}
+                    }
+                    if (actualHeight <= 0 && sActualHeightField != null) {
+                        try { actualHeight = sActualHeightField.getInt(bgView); } catch (Throwable ignored) {}
                     }
                     if (actualHeight <= 0) actualHeight = bgView.getHeight();
 
