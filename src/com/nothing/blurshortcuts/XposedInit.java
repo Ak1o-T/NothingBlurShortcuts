@@ -544,8 +544,17 @@ public class XposedInit implements IXposedHookLoadPackage {
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                     android.app.Dialog dialog = (android.app.Dialog) param.thisObject;
                     if (dialog != null && dialog.getWindow() != null) {
-                        View decor = dialog.getWindow().getDecorView();
+                        final View decor = dialog.getWindow().getDecorView();
                         styleVolumeDialog(decor);
+                        if (decor != null) {
+                            decor.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                                @Override
+                                public void onLayoutChange(View v, int left, int top, int right, int bottom,
+                                                           int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                                    styleVolumeDialog(v);
+                                }
+                            });
+                        }
                     }
                 }
             });
@@ -623,6 +632,53 @@ public class XposedInit implements IXposedHookLoadPackage {
             Log.e(TAG, "VolumeDialogSettingsButtonViewBinder hooked for frosted glass styling!");
         } catch (Throwable t) {
             Log.e(TAG, "VolumeDialogSettingsButtonViewBinder hook check: " + t.getMessage());
+        }
+
+        // Hook VolumeDialogCaptionsButtonViewBinder for Live Captions button styling
+        try {
+            Class<?> captionsBinderCls = cl.loadClass("com.android.systemui.volume.dialog.captions.ui.binder.VolumeDialogCaptionsButtonViewBinder");
+            for (Method m : captionsBinderCls.getDeclaredMethods()) {
+                m.setAccessible(true);
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        for (Object arg : param.args) {
+                            if (arg instanceof View) {
+                                styleVolumeDialog((View) arg);
+                            }
+                        }
+                    }
+                });
+            }
+            Log.e(TAG, "VolumeDialogCaptionsButtonViewBinder hooked for frosted glass styling!");
+        } catch (Throwable t) {
+            Log.e(TAG, "VolumeDialogCaptionsButtonViewBinder hook check: " + t.getMessage());
+        }
+
+        // Hook CaptionsToggleImageButton directly so any state or visibility changes trigger styling
+        try {
+            Class<?> captionsBtnCls = cl.loadClass("com.android.systemui.volume.CaptionsToggleImageButton");
+            XC_MethodHook styleBtnHook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    View btn = (View) param.thisObject;
+                    if (btn != null) {
+                        View root = btn.getRootView();
+                        if (root != null) {
+                            styleVolumeDialog(root);
+                        } else {
+                            styleVolumeDialog(btn);
+                        }
+                    }
+                }
+            };
+            try { XposedBridge.hookAllConstructors(captionsBtnCls, styleBtnHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(captionsBtnCls, "onAttachedToWindow", styleBtnHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(captionsBtnCls, "setVisibility", styleBtnHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(captionsBtnCls, "setCaptionsEnabled", styleBtnHook); } catch (Throwable ignored) {}
+            Log.e(TAG, "CaptionsToggleImageButton hooked for frosted glass styling!");
+        } catch (Throwable t) {
+            Log.e(TAG, "CaptionsToggleImageButton hook check: " + t.getMessage());
         }
 
         // 5. Hook Notifications for Lockscreen & Heads-Up Frosted Blur Style
@@ -2357,25 +2413,49 @@ public class XposedInit implements IXposedHookLoadPackage {
                 applyFrostedGlassToDrawable(assistantView.getBackground(), tintColor, strokeWidth, strokeColor);
             }
         }
+
+        // 6. Deep scan and style all Live Captions buttons and parent capsules
+        styleAllCaptionsViews(root, tintColor, strokeWidth, strokeColor);
+    }
+
+    private static void styleAllCaptionsViews(View v, int tintColor, int strokeWidth, int strokeColor) {
+        if (v == null) return;
+        String clsName = v.getClass().getName();
+        if (clsName.contains("CaptionsToggleImageButton") || clsName.contains("CaptionsButton")) {
+            ViewParent parent = v.getParent();
+            if (parent instanceof View) {
+                View parentView = (View) parent;
+                if (parentView.getBackground() != null) {
+                    applyFrostedGlassToDrawable(parentView.getBackground(), tintColor, strokeWidth, strokeColor);
+                }
+            }
+            // Clear inner toggle button background so the frosted capsule shines through without an opaque grey box
+            v.setBackground(null);
+            return;
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup vg = (ViewGroup) v;
+            int count = vg.getChildCount();
+            for (int i = 0; i < count; i++) {
+                styleAllCaptionsViews(vg.getChildAt(i), tintColor, strokeWidth, strokeColor);
+            }
+        }
     }
 
     private static void applyFrostedGlassToDrawable(Drawable bg, int tintColor, int strokeWidth, int strokeColor) {
         if (bg == null) return;
-        android.graphics.drawable.GradientDrawable gd = null;
         if (bg instanceof android.graphics.drawable.LayerDrawable) {
             android.graphics.drawable.LayerDrawable ld = (android.graphics.drawable.LayerDrawable) bg;
             for (int i = 0; i < ld.getNumberOfLayers(); i++) {
                 Drawable d = ld.getDrawable(i);
                 if (d instanceof android.graphics.drawable.GradientDrawable) {
-                    gd = (android.graphics.drawable.GradientDrawable) d;
-                    break;
+                    android.graphics.drawable.GradientDrawable gd = (android.graphics.drawable.GradientDrawable) d;
+                    gd.setColor(tintColor);
+                    gd.setStroke(strokeWidth, strokeColor);
                 }
             }
         } else if (bg instanceof android.graphics.drawable.GradientDrawable) {
-            gd = (android.graphics.drawable.GradientDrawable) bg;
-        }
-
-        if (gd != null) {
+            android.graphics.drawable.GradientDrawable gd = (android.graphics.drawable.GradientDrawable) bg;
             gd.setColor(tintColor);
             gd.setStroke(strokeWidth, strokeColor);
         }
