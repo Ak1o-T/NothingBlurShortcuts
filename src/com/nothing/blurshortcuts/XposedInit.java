@@ -1457,26 +1457,24 @@ public class XposedInit implements IXposedHookLoadPackage {
                         row = (vp instanceof View) ? (View) vp : null;
                     }
 
-                    // Skip mBackgroundDimmed when row is not in dimmed mode
-                    if (row != null && sBackgroundDimmedField != null) {
-                        try {
-                            Object dimmedObj = sBackgroundDimmedField.get(row);
-                            if (bgView == dimmedObj) {
-                                boolean isDimmed = false;
-                                try { isDimmed = (Boolean) XposedHelpers.callMethod(row, "isDimmed"); } catch (Throwable ignored) {}
-                                if (!isDimmed) {
-                                    cleanupBlur(bgView);
-                                    param.setResult(null);
-                                    return;
-                                }
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-
                     String bgCls = bgView.getClass().getName();
                     boolean isShelf = bgCls.contains("Shelf")
                             || (row != null && row.getClass().getName().contains("Shelf"))
                             || (shelfCls != null && row != null && shelfCls.isAssignableFrom(row.getClass()));
+
+                    // Only mBackgroundNormal should ever draw notification card backgrounds.
+                    // mBackgroundDimmed must NEVER draw because it stays at collapsed height and causes double borders.
+                    if (row != null && !isShelf) {
+                        try {
+                            Object normalBg = (sBackgroundNormalField != null) ? sBackgroundNormalField.get(row)
+                                    : XposedHelpers.getObjectField(row, "mBackgroundNormal");
+                            if (normalBg != null && bgView != normalBg) {
+                                cleanupBlur(bgView);
+                                param.setResult(null);
+                                return;
+                            }
+                        } catch (Throwable ignored) {}
+                    }
 
                     boolean onKeyguard = (sStatusBarState == 1) && (sLsToShadeProgress <= 0.02f) && (sFractionToShade <= 0.02f);
                     boolean inShade = (sStatusBarState == 2) || (sLsToShadeProgress > 0.02f) || (sFractionToShade > 0.02f);
