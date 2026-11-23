@@ -18,6 +18,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 import android.view.View;
+import android.view.ViewTreeObserver;
 import android.view.ViewGroup;
 import android.view.ViewParent;
 
@@ -98,6 +99,7 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static final float[] sShortcutMatrixValues = new float[9];
 
     // Pre-reflected fast fields & methods for 120 FPS notification rendering
+    private static final Map<View, ViewTreeObserver.OnPreDrawListener> sHunPreDrawListeners = new WeakHashMap<>();
     private static volatile boolean sNotificationBlursCleared = false;
     private static volatile boolean sAmbientStateLookupAttempted = false;
 
@@ -1771,6 +1773,72 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     float motionFraction = 1.0f;
                     if (isHun && row != null) {
+                        synchronized (sHunPreDrawListeners) {
+                            if (!sHunPreDrawListeners.containsKey(bgView)) {
+                                final View rowView = row;
+                                final View bgV = bgView;
+                                final ViewTreeObserver.OnPreDrawListener listener = new ViewTreeObserver.OnPreDrawListener() {
+                                    private float lastY = Float.NaN;
+                                    private float lastX = Float.NaN;
+                                    private float lastAlpha = Float.NaN;
+                                    private float lastScaleX = Float.NaN;
+                                    private float lastScaleY = Float.NaN;
+
+                                    @Override
+                                    public boolean onPreDraw() {
+                                        if (!bgV.isAttachedToWindow() || rowView == null) {
+                                            try {
+                                                ViewTreeObserver vto = bgV.getViewTreeObserver();
+                                                if (vto != null && vto.isAlive()) {
+                                                    vto.removeOnPreDrawListener(this);
+                                                }
+                                            } catch (Throwable ignored) {}
+                                            synchronized (sHunPreDrawListeners) {
+                                                sHunPreDrawListeners.remove(bgV);
+                                            }
+                                            return true;
+                                        }
+
+                                        float y = rowView.getTranslationY();
+                                        if (y == 0f) {
+                                            try {
+                                                Object t = XposedHelpers.callMethod(rowView, "getTranslation");
+                                                if (t instanceof Float) y = (Float) t;
+                                            } catch (Throwable ignored) {}
+                                        }
+                                        float x = rowView.getTranslationX();
+                                        float a = rowView.getAlpha();
+                                        float sx = rowView.getScaleX();
+                                        float sy = rowView.getScaleY();
+
+                                        boolean animatingAway = false;
+                                        if (sIsHeadsUpAnimatingAwayMethod != null) {
+                                            try { animatingAway = (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(rowView); } catch (Throwable ignored) {}
+                                        }
+
+                                        boolean isMoving = animatingAway || y != 0f || x != 0f || a < 0.99f || sx != 1f || sy != 1f
+                                                || y != lastY || x != lastX || a != lastAlpha || sx != lastScaleX || sy != lastScaleY;
+
+                                        lastY = y;
+                                        lastX = x;
+                                        lastAlpha = a;
+                                        lastScaleX = sx;
+                                        lastScaleY = sy;
+
+                                        if (isMoving) {
+                                            bgV.invalidate();
+                                        }
+                                        return true;
+                                    }
+                                };
+                                ViewTreeObserver vto = bgView.getViewTreeObserver();
+                                if (vto != null && vto.isAlive()) {
+                                    vto.addOnPreDrawListener(listener);
+                                    sHunPreDrawListeners.put(bgView, listener);
+                                }
+                            }
+                        }
+
                         float transY = 0f;
                         float transX = 0f;
                         try {
@@ -2098,6 +2166,17 @@ public class XposedInit implements IXposedHookLoadPackage {
                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                     if (param.thisObject instanceof View) {
                         View v = (View) param.thisObject;
+                        synchronized (sHunPreDrawListeners) {
+                            ViewTreeObserver.OnPreDrawListener l = sHunPreDrawListeners.remove(v);
+                            if (l != null) {
+                                try {
+                                    ViewTreeObserver vto = v.getViewTreeObserver();
+                                    if (vto != null && vto.isAlive()) {
+                                        vto.removeOnPreDrawListener(l);
+                                    }
+                                } catch (Throwable ignored) {}
+                            }
+                        }
                         cleanupBlur(v);
                         sAllNotificationBackgrounds.remove(v);
                     }
@@ -2566,6 +2645,17 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     private static void cleanupBlur(View bgView) {
         if (bgView == null) return;
+        synchronized (sHunPreDrawListeners) {
+            ViewTreeObserver.OnPreDrawListener l = sHunPreDrawListeners.remove(bgView);
+            if (l != null) {
+                try {
+                    ViewTreeObserver vto = bgView.getViewTreeObserver();
+                    if (vto != null && vto.isAlive()) {
+                        vto.removeOnPreDrawListener(l);
+                    }
+                } catch (Throwable ignored) {}
+            }
+        }
         try {
             Object bd = null;
             if (sBackgroundBlurDrawableField != null) {
