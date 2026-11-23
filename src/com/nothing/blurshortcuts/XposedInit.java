@@ -1428,41 +1428,21 @@ public class XposedInit implements IXposedHookLoadPackage {
                             || (parent != null && parent.getClass().getName().contains("Shelf"))
                             || (shelfCls != null && parent != null && shelfCls.isAssignableFrom(parent.getClass()));
 
-                    boolean inShade = (sStatusBarState != 1); // 0 = SHADE, 2 = SHADE_LOCKED
+                    boolean onKeyguard = (sStatusBarState == 1) && (sLsToShadeProgress <= 0.02f) && (sFractionToShade <= 0.02f);
+                    boolean inShade = (sStatusBarState == 2) || (sLsToShadeProgress > 0.02f) || (sFractionToShade > 0.02f);
                     if (sStatusBarStateController != null) {
                         try {
-                            int st = (Integer) XposedHelpers.callMethod(sStatusBarStateController, "getState");
-                            if (st != 1) {
-                                inShade = true;
+                            int st = (sStateField != null) ? sStateField.getInt(sStatusBarStateController)
+                                    : (Integer) XposedHelpers.callMethod(sStatusBarStateController, "getState");
+                            if (st != sStatusBarState) {
                                 sStatusBarState = st;
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-                    if (!inShade && sNsslView != null) {
-                        try {
-                            if (sNsslIsExpandedMethod != null) {
-                                if ((Boolean) sNsslIsExpandedMethod.invoke(sNsslView)) inShade = true;
-                            } else {
-                                if ((Boolean) XposedHelpers.callMethod(sNsslView, "isExpanded")) inShade = true;
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-                    if (sLsToShadeProgress > 0.02f || sFractionToShade > 0.02f) {
-                        inShade = true;
-                    }
-
-                    boolean onKeyguard = !inShade;
-                    if (onKeyguard && sOnKeyguardField != null) {
-                        try {
-                            if (!sOnKeyguardField.getBoolean(bgView)) {
-                                onKeyguard = false;
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-                    if (onKeyguard && parent != null && sIsOnKeyguardMethod != null) {
-                        try {
-                            if (!((Boolean) sIsOnKeyguardMethod.invoke(parent))) {
-                                onKeyguard = false;
+                                if (st == 1) {
+                                    onKeyguard = (sLsToShadeProgress <= 0.02f) && (sFractionToShade <= 0.02f);
+                                    inShade = !onKeyguard;
+                                } else {
+                                    onKeyguard = false;
+                                    inShade = true;
+                                }
                             }
                         } catch (Throwable ignored) {}
                     }
@@ -1492,15 +1472,19 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
                     }
 
-                    // 5. Target determination:
-                    // Frosted Glass Blur applies to:
-                    // - All notifications on the resting lockscreen (onKeyguard && !inShade)
-                    // - Compact notification shelf collage capsule (isShelf && onKeyguard && !inShade)
-                    // - Heads-Up pinned alerts over apps (isHun && !inShade)
-                    // Excluded from blur:
-                    // - Notifications in Notification Shade / Shade Menu (inShade == true)
-                    // - Bouncer (PIN/password/pattern screen)
-                    // - Colorized media player with album art
+                    if (sStatusBarState == 0 && !isHun) {
+                        inShade = true;
+                    }
+
+                    // Target determination (Two-View Notification Architecture):
+                    // View 1 - Frosted Glass Blur Mode applies to:
+                    //   - All notification cards on resting lockscreen (onKeyguard)
+                    //   - Collapsed shelf collage capsule on lockscreen (isShelf && onKeyguard)
+                    //   - Heads-Up floating banner alerts over apps (isHun && !inShade)
+                    // View 2 - Classic Solid Stock System Background Mode applies to:
+                    //   - All notifications in Notification Shade menu (inShade == true)
+                    //   - Bouncer PIN/password screen
+                    //   - Colorized media player with album art
                     boolean isTarget = false;
                     if (sScreenAwake && !sBouncerShowing && !isColorized && !inShade) {
                         if (isShelf) {
@@ -1508,14 +1492,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                         } else {
                             isTarget = onKeyguard || isHun;
                         }
-                    }
-
-                    if (!isTarget) {
-                        // Stock System Notification Background Mode (Notification Shade / shade menu / desktop)
-                        // Ensure any blur is turned off and solid stock color (white in light, graphite in dark) is restored!
-                        cleanupBlur(bgView);
-                        // DO NOT cancel onDraw! Let native NotificationBackgroundView draw authentic classic system background!
-                        return;
                     }
 
                     Canvas canvas = (Canvas) param.args[0];
@@ -1536,14 +1512,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
                     }
                     if (showNoBg && !isShelf) {
-                        try {
-                            Object bd = (sBackgroundBlurDrawableField != null) ? sBackgroundBlurDrawableField.get(bgView) : null;
-                            if (bd != null) {
-                                if (sSetBlurRadiusMethod != null) sSetBlurRadiusMethod.invoke(bd, 0);
-                                if (sSetColorMethod != null) sSetColorMethod.invoke(bd, 0);
-                                ((Drawable) bd).setVisible(false, false);
-                            }
-                        } catch (Throwable ignored) {}
+                        cleanupBlur(bgView);
                         param.setResult(null);
                         return;
                     }
@@ -1654,92 +1623,91 @@ public class XposedInit implements IXposedHookLoadPackage {
                     canvas.save();
                     canvas.clipPath(sClipPath);
 
-                    // 1. Hardware RenderNode Wallpaper Blur (SurfaceFlinger)
-                    Object blurDrawable = null;
-                    if (sBackgroundBlurDrawableField != null) {
-                        try { blurDrawable = sBackgroundBlurDrawableField.get(bgView); } catch (Throwable ignored) {}
-                    }
+                    if (isTarget) {
+                        // View 1: Frosted Glass Blur Mode (Lockscreen & Shelf Collage & Floating HUN)
+                        // 1. Hardware RenderNode Wallpaper Blur (SurfaceFlinger)
+                        Object blurDrawable = null;
+                        if (sBackgroundBlurDrawableField != null) {
+                            try { blurDrawable = sBackgroundBlurDrawableField.get(bgView); } catch (Throwable ignored) {}
+                        }
 
-                    if (blurDrawable == null) {
-                        try {
-                            Object vri = null;
-                            if (sGetViewRootImplMethod != null) {
-                                try { vri = sGetViewRootImplMethod.invoke(bgView); } catch (Throwable ignored) {}
+                        if (blurDrawable == null) {
+                            try {
+                                Object vri = (sGetViewRootImplMethod != null) ? sGetViewRootImplMethod.invoke(bgView)
+                                        : XposedHelpers.callMethod(bgView, "getViewRootImpl");
+                                if (vri != null) {
+                                    blurDrawable = (sCreateBackgroundBlurDrawableMethod != null)
+                                            ? sCreateBackgroundBlurDrawableMethod.invoke(vri)
+                                            : XposedHelpers.callMethod(vri, "createBackgroundBlurDrawable");
+                                    if (blurDrawable instanceof Drawable) {
+                                        ((Drawable) blurDrawable).setCallback(bgView);
+                                    }
+                                    if (sBackgroundBlurDrawableField != null) {
+                                        sBackgroundBlurDrawableField.set(bgView, blurDrawable);
+                                    } else {
+                                        XposedHelpers.setObjectField(bgView, "mBackgroundBlurDrawable", blurDrawable);
+                                    }
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+
+                        if (blurDrawable != null) {
+                            try {
+                                ((Drawable) blurDrawable).setVisible(true, false);
+                            } catch (Throwable ignored) {}
+
+                            if (sSetColorMethod != null) {
+                                try { sSetColorMethod.invoke(blurDrawable, 0); } catch (Throwable ignored) {}
                             } else {
-                                try { vri = XposedHelpers.callMethod(bgView, "getViewRootImpl"); } catch (Throwable ignored) {}
+                                try { XposedHelpers.callMethod(blurDrawable, "setColor", 0); } catch (Throwable ignored) {}
                             }
-                            if (vri != null) {
-                                if (sCreateBackgroundBlurDrawableMethod != null) {
-                                    blurDrawable = sCreateBackgroundBlurDrawableMethod.invoke(vri);
-                                } else {
-                                    blurDrawable = XposedHelpers.callMethod(vri, "createBackgroundBlurDrawable");
-                                }
-                                if (blurDrawable instanceof Drawable) {
-                                    ((Drawable) blurDrawable).setCallback(bgView);
-                                }
-                                if (sBackgroundBlurDrawableField != null) {
-                                    sBackgroundBlurDrawableField.set(bgView, blurDrawable);
-                                } else {
-                                    XposedHelpers.setObjectField(bgView, "mBackgroundBlurDrawable", blurDrawable);
-                                }
+
+                            if (sSetBlurRadiusMethod != null) {
+                                try { sSetBlurRadiusMethod.invoke(blurDrawable, 160); } catch (Throwable ignored) {}
+                            } else {
+                                try { XposedHelpers.callMethod(blurDrawable, "setBlurRadius", 160); } catch (Throwable ignored) {}
                             }
-                        } catch (Throwable ignored) {}
-                    }
+                            if (sSetCornerRadiusMethod != null) {
+                                try { sSetCornerRadiusMethod.invoke(blurDrawable, topRadius, topRadius, bottomRadius, bottomRadius); } catch (Throwable ignored) {}
+                            } else if (sSetCornerRadiusSingleMethod != null) {
+                                try { sSetCornerRadiusSingleMethod.invoke(blurDrawable, Math.max(topRadius, bottomRadius)); } catch (Throwable ignored) {}
+                            }
+                            Drawable bd = (Drawable) blurDrawable;
+                            bd.setBounds(drawLeft, drawTop, drawRight, drawBottom);
+                            bd.draw(canvas);
+                        }
 
-                    if (blurDrawable != null) {
-                        try {
-                            ((Drawable) blurDrawable).setVisible(true, false);
-                        } catch (Throwable ignored) {}
+                        // 2. Frosted Glass Tint & Specular Border Highlight (Dynamic Dark & Light Theme)
+                        int frostedColor = getFrostedBackdropColor(ctx, isDark);
+                        if (isShelf) {
+                            frostedColor = isDark ? 0x38000000 : 0x40FFFFFF;
+                        }
+                        glassTintPaint.setColor(frostedColor);
 
-                        // CRITICAL: Clear opaque tint color from BackgroundBlurDrawable!
-                        // SystemUI by default calls blurDrawable.setColor(mTintColor) with 0xFFFCFCFC / 0xFF1E1E1E,
-                        // which covers the blur with an opaque plate. Setting color to 0 reveals pure SurfaceFlinger blur!
-                        if (sSetColorMethod != null) {
-                            try { sSetColorMethod.invoke(blurDrawable, 0); } catch (Throwable ignored) {}
+                        if (isDark) {
+                            glassBorderPaint.setColor(isShelf ? 0x35FFFFFF : 0x28FFFFFF);
                         } else {
-                            try { XposedHelpers.callMethod(blurDrawable, "setColor", 0); } catch (Throwable ignored) {}
+                            glassBorderPaint.setColor(0x45FFFFFF);
                         }
+                        glassBorderPaint.setStrokeWidth(1.0f * densityF);
 
-                        if (sSetBlurRadiusMethod != null) {
-                            try { sSetBlurRadiusMethod.invoke(blurDrawable, 160); } catch (Throwable ignored) {}
-                        } else {
-                            try { XposedHelpers.callMethod(blurDrawable, "setBlurRadius", 160); } catch (Throwable ignored) {}
-                        }
-                        if (sSetCornerRadiusMethod != null) {
-                            try { sSetCornerRadiusMethod.invoke(blurDrawable, topRadius, topRadius, bottomRadius, bottomRadius); } catch (Throwable ignored) {}
-                        } else if (sSetCornerRadiusSingleMethod != null) {
-                            try { sSetCornerRadiusSingleMethod.invoke(blurDrawable, Math.max(topRadius, bottomRadius)); } catch (Throwable ignored) {}
-                        }
-                        Drawable bd = (Drawable) blurDrawable;
-                        bd.setBounds(drawLeft, drawTop, drawRight, drawBottom);
-                        bd.draw(canvas);
-                    }
-
-                    // 2. Frosted Glass Tint & Specular Border Highlight (Dynamic Dark & Light Theme)
-                    int frostedColor = getFrostedBackdropColor(ctx, isDark);
-                    if (isShelf) {
-                        frostedColor = isDark ? 0x38000000 : 0x40FFFFFF;
-                    }
-                    glassTintPaint.setColor(frostedColor);
-
-                    if (isDark) {
-                        glassBorderPaint.setColor(isShelf ? 0x35FFFFFF : 0x28FFFFFF);
+                        canvas.drawPath(sClipPath, glassTintPaint);
+                        canvas.drawPath(sClipPath, glassBorderPaint);
                     } else {
-                        glassBorderPaint.setColor(0x45FFFFFF);
-                    }
-                    glassBorderPaint.setStrokeWidth(1.0f * densityF);
+                        // View 2: Classic Stock System Background Mode (Notification Shade Menu)
+                        // Turn off hardware blur so SurfaceFlinger punches no hole
+                        cleanupBlur(bgView);
 
-                    canvas.drawPath(sClipPath, glassTintPaint);
-                    canvas.drawPath(sClipPath, glassBorderPaint);
+                        // Draw authentic uniform solid system plate
+                        int solidColor = resolveStockNotifColor(bgView);
+                        solidBgPaint.setColor(solidColor);
+                        canvas.drawPath(sClipPath, solidBgPaint);
+                    }
 
                     // 3. Ripple effect for touch feedback on all notification cards
                     try {
-                        Object bgObj = null;
-                        if (sBackgroundField != null) {
-                            bgObj = sBackgroundField.get(bgView);
-                        } else {
-                            bgObj = XposedHelpers.getObjectField(bgView, "mBackground");
-                        }
+                        Object bgObj = (sBackgroundField != null) ? sBackgroundField.get(bgView)
+                                : XposedHelpers.getObjectField(bgView, "mBackground");
                         if (bgObj instanceof android.graphics.drawable.LayerDrawable) {
                             android.graphics.drawable.LayerDrawable ld = (android.graphics.drawable.LayerDrawable) bgObj;
                             for (int i = 0; i < ld.getNumberOfLayers(); i++) {
@@ -1758,7 +1726,7 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     canvas.restore();
 
-                    // Cancel original onDraw ONLY when isTarget is true (frosted blur handled by us)
+                    // Cancel original onDraw because we cleanly render both View 1 and View 2!
                     param.setResult(null);
                 }
             };
@@ -1808,7 +1776,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                         while (p != null) {
                             if (p.getClass().getName().contains("ExpandableNotificationRow")) {
                                 try {
-                                    boolean onKg = (sIsOnKeyguardMethod != null) ? (Boolean) sIsOnKeyguardMethod.invoke(p) : false;
+                                    boolean onKg = (sStatusBarState == 1) && (sLsToShadeProgress <= 0.02f) && (sFractionToShade <= 0.02f);
+                                    if (!onKg && sIsOnKeyguardMethod != null) {
+                                        try { onKg = (Boolean) sIsOnKeyguardMethod.invoke(p); } catch (Throwable ignored) {}
+                                    }
                                     boolean pinned = (sIsPinnedMethod != null) ? (Boolean) sIsPinnedMethod.invoke(p) : false;
                                     if (onKg || pinned) {
                                         isTargetParent = true;
@@ -2220,31 +2191,18 @@ public class XposedInit implements IXposedHookLoadPackage {
     }
 
     private static int resolveStockNotifColor(View bgView) {
-        if (bgView == null) return 0;
-        int targetColor = 0;
-        if (sTintColorField != null) {
-            try { targetColor = sTintColorField.getInt(bgView); } catch (Throwable ignored) {}
-        }
-        if (targetColor == 0 && sNormalColorField != null) {
-            try { targetColor = sNormalColorField.getInt(bgView); } catch (Throwable ignored) {}
-        }
-        if (targetColor == 0) {
-            ViewParent p = bgView.getParent();
-            if (p != null && sGetNormalColorMethod != null) {
-                try { targetColor = (Integer) sGetNormalColorMethod.invoke(p); } catch (Throwable ignored) {}
-            }
-        }
+        if (bgView == null) return 0xFF303030;
         Context ctx = bgView.getContext();
         int uiMode = (ctx != null) ? (ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) : Configuration.UI_MODE_NIGHT_YES;
         boolean isDark = (uiMode == Configuration.UI_MODE_NIGHT_YES);
-        if (targetColor == 0 || (targetColor >>> 24) < 0x20) {
-            targetColor = isDark ? 0xFF1E1E1E : 0xFFFCFCFC;
-        }
-        return targetColor;
+        return isDark ? 0xFF303030 : 0xFFFCFCFC;
     }
 
     private static void cleanupBlur(View bgView) {
         if (bgView == null) return;
+        int targetColor = resolveStockNotifColor(bgView);
+        Log.i(TAG, "cleanupBlur: " + bgView.getClass().getSimpleName() + "@" + Integer.toHexString(bgView.hashCode())
+                + " targetColor=0x" + Integer.toHexString(targetColor));
         try {
             Object bd = null;
             if (sBackgroundBlurDrawableField != null) {
@@ -2259,7 +2217,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                     try { XposedHelpers.callMethod(bd, "setBlurRadius", 0); } catch (Throwable ignored) {}
                 }
 
-                int targetColor = resolveStockNotifColor(bgView);
                 if (targetColor != 0) {
                     if (sSetColorMethod != null) {
                         try { sSetColorMethod.invoke(bd, targetColor); } catch (Throwable ignored) {}
@@ -2269,7 +2226,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                 }
 
                 try {
-                    ((Drawable) bd).setVisible(true, false);
+                    ((Drawable) bd).setVisible(false, false);
                 } catch (Throwable ignored) {}
             }
         } catch (Throwable ignored) {}
