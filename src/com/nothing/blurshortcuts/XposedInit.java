@@ -1769,22 +1769,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                     float bgAlpha = bgView.getAlpha();
                     float effectiveAlpha = Math.max(0f, Math.min(1f, rowAlpha * bgAlpha));
 
-                    float animFractionMultiplier = 1.0f;
-                    if (isHun && row != null && sIsDrawingAppearAnimationMethod != null) {
-                        try {
-                            boolean isAppearing = (Boolean) sIsDrawingAppearAnimationMethod.invoke(row);
-                            if (isAppearing && sGetAppearAnimationFractionMethod != null) {
-                                float frac = (Float) sGetAppearAnimationFractionMethod.invoke(row);
-                                if (frac < 0.05f) {
-                                    cleanupBlur(bgView);
-                                    param.setResult(null);
-                                    return;
-                                }
-                                animFractionMultiplier = Math.max(0.05f, Math.min(1.0f, frac));
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-
                     float motionFraction = 1.0f;
                     if (isHun && row != null) {
                         float transY = 0f;
@@ -1816,7 +1800,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
                     }
 
-                    float combinedAlpha = effectiveAlpha * motionFraction * animFractionMultiplier;
+                    float combinedAlpha = effectiveAlpha * motionFraction;
 
                     if (!sScreenAwake || sBouncerShowing || stackAlpha < 0.05f || combinedAlpha < 0.03f) {
                         cleanupBlur(bgView);
@@ -1834,11 +1818,11 @@ public class XposedInit implements IXposedHookLoadPackage {
                     //   - Bouncer PIN/password screen
                     //   - Colorized media player with album art
                     boolean isTarget = false;
-                    if (sScreenAwake && !sBouncerShowing && !isColorized && !inShade) {
-                        if (isShelf) {
-                            isTarget = onKeyguard;
-                        } else {
-                            isTarget = onKeyguard || isHun;
+                    if (sScreenAwake && !sBouncerShowing && !isColorized) {
+                        if (isHun) {
+                            isTarget = true;
+                        } else if (onKeyguard && !inShade) {
+                            isTarget = true;
                         }
                     }
 
