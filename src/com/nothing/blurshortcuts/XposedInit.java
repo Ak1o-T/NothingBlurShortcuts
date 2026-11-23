@@ -14,6 +14,8 @@ import android.graphics.Path;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -529,6 +531,8 @@ public class XposedInit implements IXposedHookLoadPackage {
 
         // 4. Hook Volume Dialog (Android 15 / Nothing OS 5.0 volume architecture)
         try {
+            ensureBlurReflection(cl);
+
             Class<?> volDialogClass = cl.loadClass("com.android.systemui.volume.dialog.VolumeDialog");
             Log.e(TAG, "Found VolumeDialog class: " + volDialogClass);
 
@@ -539,25 +543,32 @@ public class XposedInit implements IXposedHookLoadPackage {
                 }
             });
 
-            XposedBridge.hookAllMethods(volDialogClass, "show", new XC_MethodHook() {
+            XC_MethodHook volDecorHook = new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    android.app.Dialog dialog = (android.app.Dialog) param.thisObject;
-                    if (dialog != null && dialog.getWindow() != null) {
-                        final View decor = dialog.getWindow().getDecorView();
-                        styleVolumeDialog(decor);
-                        if (decor != null) {
-                            decor.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
-                                @Override
-                                public void onLayoutChange(View v, int left, int top, int right, int bottom,
-                                                           int oldLeft, int oldTop, int oldRight, int oldBottom) {
-                                    styleVolumeDialog(v);
+                    if (param.thisObject instanceof android.app.Dialog) {
+                        android.app.Dialog dialog = (android.app.Dialog) param.thisObject;
+                        if (dialog.getWindow() != null) {
+                            final View decor = dialog.getWindow().getDecorView();
+                            if (decor != null) {
+                                styleVolumeDialog(decor);
+                                if (decor.getTag(0x7f0b0b6a) == null) {
+                                    decor.setTag(0x7f0b0b6a, Boolean.TRUE);
+                                    decor.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                                        @Override
+                                        public void onLayoutChange(View v, int left, int top, int right, int bottom,
+                                                                   int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                                            styleVolumeDialog(v);
+                                        }
+                                    });
                                 }
-                            });
+                            }
                         }
                     }
                 }
-            });
+            };
+            try { XposedBridge.hookAllMethods(volDialogClass, "onCreate", volDecorHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(volDialogClass, "show", volDecorHook); } catch (Throwable ignored) {}
         } catch (Throwable t) {
             Log.e(TAG, "VolumeDialog class hook check: " + t.getMessage());
         }
@@ -577,7 +588,20 @@ public class XposedInit implements IXposedHookLoadPackage {
                                 } else if (arg instanceof android.app.Dialog) {
                                     android.app.Dialog d = (android.app.Dialog) arg;
                                     if (d.getWindow() != null) {
-                                        styleVolumeDialog(d.getWindow().getDecorView());
+                                        final View decor = d.getWindow().getDecorView();
+                                        if (decor != null) {
+                                            styleVolumeDialog(decor);
+                                            if (decor.getTag(0x7f0b0b6a) == null) {
+                                                decor.setTag(0x7f0b0b6a, Boolean.TRUE);
+                                                decor.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                                                    @Override
+                                                    public void onLayoutChange(View v, int left, int top, int right, int bottom,
+                                                                               int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                                                        styleVolumeDialog(v);
+                                                    }
+                                                });
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -2343,6 +2367,160 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
     }
 
+    private static void ensureBlurReflection(ClassLoader cl) {
+        if (sCreateBackgroundBlurDrawableMethod != null && sSetBlurRadiusMethod != null && sSetCornerRadiusSingleMethod != null) return;
+        try {
+            if (sGetViewRootImplMethod == null) {
+                try {
+                    sGetViewRootImplMethod = View.class.getMethod("getViewRootImpl");
+                    sGetViewRootImplMethod.setAccessible(true);
+                } catch (Throwable ignored) {}
+            }
+            if (sCreateBackgroundBlurDrawableMethod == null) {
+                try {
+                    Class<?> vriCls = (cl != null) ? cl.loadClass("android.view.ViewRootImpl") : Class.forName("android.view.ViewRootImpl");
+                    sCreateBackgroundBlurDrawableMethod = vriCls.getMethod("createBackgroundBlurDrawable");
+                    sCreateBackgroundBlurDrawableMethod.setAccessible(true);
+                } catch (Throwable ignored) {}
+            }
+            if (sSetBlurRadiusMethod == null || sSetCornerRadiusSingleMethod == null) {
+                try {
+                    Class<?> bbdCls = (cl != null) ? cl.loadClass("com.android.internal.graphics.drawable.BackgroundBlurDrawable") : Class.forName("com.android.internal.graphics.drawable.BackgroundBlurDrawable");
+                    try { sSetBlurRadiusMethod = bbdCls.getMethod("setBlurRadius", int.class); sSetBlurRadiusMethod.setAccessible(true); } catch (Throwable ignored) {}
+                    try { sSetCornerRadiusMethod = bbdCls.getMethod("setCornerRadius", float.class, float.class, float.class, float.class); sSetCornerRadiusMethod.setAccessible(true); } catch (Throwable ignored) {}
+                    try { sSetCornerRadiusSingleMethod = bbdCls.getMethod("setCornerRadius", float.class); sSetCornerRadiusSingleMethod.setAccessible(true); } catch (Throwable ignored) {}
+                    try { sSetColorMethod = bbdCls.getMethod("setColor", int.class); sSetColorMethod.setAccessible(true); } catch (Throwable ignored) {}
+                } catch (Throwable ignored) {}
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "ensureBlurReflection error: " + t.getMessage());
+        }
+    }
+
+    private static void setupCaptionsBlur(final View captionsView, final int tintColor, final int strokeWidth, final int strokeColor) {
+        if (captionsView == null) return;
+        final Context ctx = captionsView.getContext();
+        if (ctx == null) return;
+
+        ensureBlurReflection(ctx.getClassLoader());
+
+        final Runnable applyRunnable = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Object vri = null;
+                    if (sGetViewRootImplMethod != null) {
+                        try { vri = sGetViewRootImplMethod.invoke(captionsView); } catch (Throwable ignored) {}
+                        if (vri == null && captionsView.getRootView() != null) {
+                            try { vri = sGetViewRootImplMethod.invoke(captionsView.getRootView()); } catch (Throwable ignored) {}
+                        }
+                    }
+
+                    Resources res = ctx.getResources();
+                    float density = res.getDisplayMetrics().density;
+                    int cornerRadius = Math.round(29.0f * density);
+                    int blurRadius = Math.round(23.0f * density);
+                    try {
+                        int rId = res.getIdentifier("volume_dialog_panel_width_half", "dimen", "com.android.systemui");
+                        if (rId != 0) cornerRadius = res.getDimensionPixelSize(rId);
+                    } catch (Throwable ignored) {}
+                    try {
+                        int bId = res.getIdentifier("volume_dialog_background_surface_blur_radius", "dimen", "com.android.systemui");
+                        if (bId != 0) blurRadius = res.getDimensionPixelSize(bId);
+                    } catch (Throwable ignored) {}
+
+                    Drawable currentBg = captionsView.getBackground();
+
+                    // 1. If already a LayerDrawable, update existing BackgroundBlurDrawable and GradientDrawable
+                    if (currentBg instanceof LayerDrawable) {
+                        LayerDrawable ld = (LayerDrawable) currentBg;
+                        boolean hasBlur = false;
+                        for (int i = 0; i < ld.getNumberOfLayers(); i++) {
+                            Drawable layer = ld.getDrawable(i);
+                            if (layer != null && layer.getClass().getName().contains("BackgroundBlurDrawable")) {
+                                hasBlur = true;
+                                if (sSetBlurRadiusMethod != null) {
+                                    try { sSetBlurRadiusMethod.invoke(layer, blurRadius); } catch (Throwable ignored) {}
+                                }
+                                if (sSetCornerRadiusSingleMethod != null) {
+                                    try { sSetCornerRadiusSingleMethod.invoke(layer, (float) cornerRadius); } catch (Throwable ignored) {}
+                                }
+                            } else if (layer instanceof GradientDrawable) {
+                                GradientDrawable gd = (GradientDrawable) layer;
+                                gd.setColor(tintColor);
+                                gd.setStroke(strokeWidth, strokeColor);
+                                gd.setCornerRadius(cornerRadius);
+                            }
+                        }
+                        if (hasBlur) {
+                            captionsView.invalidate();
+                            return;
+                        }
+                    }
+
+                    // 2. If ViewRootImpl is available, create BackgroundBlurDrawable and combine into LayerDrawable
+                    if (vri != null && sCreateBackgroundBlurDrawableMethod != null) {
+                        Object blurDrawable = sCreateBackgroundBlurDrawableMethod.invoke(vri);
+                        if (blurDrawable instanceof Drawable) {
+                            if (sSetCornerRadiusSingleMethod != null) {
+                                try { sSetCornerRadiusSingleMethod.invoke(blurDrawable, (float) cornerRadius); } catch (Throwable ignored) {}
+                            }
+                            if (sSetBlurRadiusMethod != null) {
+                                try { sSetBlurRadiusMethod.invoke(blurDrawable, blurRadius); } catch (Throwable ignored) {}
+                            }
+
+                            GradientDrawable gd;
+                            if (currentBg instanceof GradientDrawable) {
+                                gd = (GradientDrawable) currentBg.mutate();
+                            } else {
+                                gd = new GradientDrawable();
+                            }
+                            gd.setCornerRadius(cornerRadius);
+                            gd.setColor(tintColor);
+                            gd.setStroke(strokeWidth, strokeColor);
+
+                            LayerDrawable ld = new LayerDrawable(new Drawable[] { (Drawable) blurDrawable, gd });
+                            captionsView.setBackground(ld);
+                            captionsView.invalidate();
+                            Log.e(TAG, "setupCaptionsBlur: Successfully created and attached LayerDrawable with BackgroundBlurDrawable to odi_captions!");
+                            return;
+                        }
+                    }
+
+                    // 3. ViewRootImpl not yet attached: style existing gradient and attach listener
+                    if (currentBg != null) {
+                        applyFrostedGlassToDrawable(currentBg, tintColor, strokeWidth, strokeColor);
+                    }
+                    if (!captionsView.isAttachedToWindow()) {
+                        captionsView.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+                            @Override
+                            public void onViewAttachedToWindow(View v) {
+                                v.removeOnAttachStateChangeListener(this);
+                                v.post(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        setupCaptionsBlur(captionsView, tintColor, strokeWidth, strokeColor);
+                                    }
+                                });
+                            }
+                            @Override
+                            public void onViewDetachedFromWindow(View v) {}
+                        });
+                    }
+                } catch (Throwable t) {
+                    Log.e(TAG, "setupCaptionsBlur error: " + t.getMessage(), t);
+                }
+            }
+        };
+
+        if (captionsView.isAttachedToWindow()) {
+            applyRunnable.run();
+        } else {
+            captionsView.post(applyRunnable);
+            applyRunnable.run();
+        }
+    }
+
     private static void styleVolumeDialog(View root) {
         if (root == null) return;
         Context ctx = root.getContext();
@@ -2355,15 +2533,32 @@ public class XposedInit implements IXposedHookLoadPackage {
         int strokeColor = isDark ? 0x28FFFFFF : 0x35FFFFFF;
         int strokeWidth = Math.max(2, Math.round(1.0f * ctx.getResources().getDisplayMetrics().density));
 
-        if (sIdVolumeBg == -1) {
+        if (sIdVolumeBg <= 0) {
             String pkg = ctx.getPackageName();
             Resources res = root.getResources();
             sIdExpandContainer = res.getIdentifier("volume_expand_bar_container", "id", pkg);
+            if (sIdExpandContainer <= 0) sIdExpandContainer = res.getIdentifier("volume_expand_bar_container", "id", "com.android.systemui");
+            if (sIdExpandContainer <= 0) sIdExpandContainer = 0x7f0b0b85;
+
             sIdVolumeBg = res.getIdentifier("volume_dialog_background", "id", pkg);
+            if (sIdVolumeBg <= 0) sIdVolumeBg = res.getIdentifier("volume_dialog_background", "id", "com.android.systemui");
+            if (sIdVolumeBg <= 0) sIdVolumeBg = 0x7f0b0b6b;
+
             sIdRingerBg = res.getIdentifier("ringer_buttons_background", "id", pkg);
+            if (sIdRingerBg <= 0) sIdRingerBg = res.getIdentifier("ringer_buttons_background", "id", "com.android.systemui");
+            if (sIdRingerBg <= 0) sIdRingerBg = 0x7f0b085a;
+
             sIdCaptions = res.getIdentifier("odi_captions", "id", pkg);
+            if (sIdCaptions <= 0) sIdCaptions = res.getIdentifier("odi_captions", "id", "com.android.systemui");
+            if (sIdCaptions <= 0) sIdCaptions = 0x7f0b0738;
+
             sIdA11y = res.getIdentifier("accessibility_slider_container", "id", pkg);
+            if (sIdA11y <= 0) sIdA11y = res.getIdentifier("accessibility_slider_container", "id", "com.android.systemui");
+            if (sIdA11y <= 0) sIdA11y = 0x7f0b006b;
+
             sIdAssistant = res.getIdentifier("assistant_slider_container", "id", pkg);
+            if (sIdAssistant <= 0) sIdAssistant = res.getIdentifier("assistant_slider_container", "id", "com.android.systemui");
+            if (sIdAssistant <= 0) sIdAssistant = 0x7f0b0129;
         }
 
         // 1. Remove solid opaque background plate from volume_expand_bar_container
@@ -2390,12 +2585,15 @@ public class XposedInit implements IXposedHookLoadPackage {
             }
         }
 
-        // 4. Style odi_captions if present
+        // 4. Style odi_captions with genuine hardware BackgroundBlurDrawable
         if (sIdCaptions != 0) {
             View captionsView = root.findViewById(sIdCaptions);
             if (captionsView != null) {
-                applyFrostedGlassToDrawable(captionsView.getBackground(), tintColor, strokeWidth, strokeColor);
+                setupCaptionsBlur(captionsView, tintColor, strokeWidth, strokeColor);
             }
+        }
+        if (root.getId() == sIdCaptions) {
+            setupCaptionsBlur(root, tintColor, strokeWidth, strokeColor);
         }
 
         // 5. Style accessibility & assistant sliders if present
@@ -2424,9 +2622,7 @@ public class XposedInit implements IXposedHookLoadPackage {
             ViewParent parent = v.getParent();
             if (parent instanceof View) {
                 View parentView = (View) parent;
-                if (parentView.getBackground() != null) {
-                    applyFrostedGlassToDrawable(parentView.getBackground(), tintColor, strokeWidth, strokeColor);
-                }
+                setupCaptionsBlur(parentView, tintColor, strokeWidth, strokeColor);
             }
             // Keep the button's background as TransitionDrawable to avoid NullPointerException in SystemUI Kotlin casts!
             // Simply set all its layers to transparent so the parent's frosted capsule shows through.
