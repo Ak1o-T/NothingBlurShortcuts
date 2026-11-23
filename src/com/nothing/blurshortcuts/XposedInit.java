@@ -6,6 +6,7 @@ import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Path;
@@ -131,6 +132,7 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static Method sIsPinnedAndExpandedMethod = null;
     private static Method sIsHeadsUpMethod = null;
     private static Method sIsHeadsUpStateMethod = null;
+    private static Method sIsHeadsUpAnimatingAwayMethod = null;
     private static Method sIsOnKeyguardMethod = null;
     private static Method sIsColorizedMethod = null;
     private static Method sGetTopCornerRadiusMethod = null;
@@ -1232,6 +1234,7 @@ public class XposedInit implements IXposedHookLoadPackage {
             try { sIsPinnedAndExpandedMethod = notifRowClass.getMethod("isPinnedAndExpanded"); sIsPinnedAndExpandedMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sIsHeadsUpMethod = notifRowClass.getMethod("isHeadsUp"); sIsHeadsUpMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sIsHeadsUpStateMethod = notifRowClass.getMethod("isHeadsUpState"); sIsHeadsUpStateMethod.setAccessible(true); } catch (Throwable ignored) {}
+            try { sIsHeadsUpAnimatingAwayMethod = notifRowClass.getMethod("isHeadsUpAnimatingAway"); sIsHeadsUpAnimatingAwayMethod.setAccessible(true); } catch (Throwable ignored) {}
             try {
                 Class<?> anvCls = cl.loadClass("com.android.systemui.statusbar.notification.row.ActivatableNotificationView");
                 sIsOnKeyguardMethod = anvCls.getMethod("isOnKeyguard");
@@ -1300,6 +1303,63 @@ public class XposedInit implements IXposedHookLoadPackage {
             try { XposedBridge.hookAllMethods(notifRowClass, "setUserExpanded", rowExpansionHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifRowClass, "setShowingExpanded", rowExpansionHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifRowClass, "setGroupExpanded", rowExpansionHook); } catch (Throwable ignored) {}
+
+            XC_MethodHook headsUpAnimatingAwayHook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    View row = (View) param.thisObject;
+                    if (row != null) {
+                        boolean animatingAway = false;
+                        if (param.args.length > 0 && param.args[0] instanceof Boolean) {
+                            animatingAway = (Boolean) param.args[0];
+                        }
+                        if (!animatingAway) {
+                            if (sBackgroundNormalField != null) {
+                                try {
+                                    View bgNormal = (View) sBackgroundNormalField.get(row);
+                                    if (bgNormal != null) cleanupBlur(bgNormal);
+                                } catch (Throwable ignored) {}
+                            }
+                        } else {
+                            row.invalidate();
+                            if (sBackgroundNormalField != null) {
+                                try {
+                                    View bgNormal = (View) sBackgroundNormalField.get(row);
+                                    if (bgNormal != null) bgNormal.invalidate();
+                                } catch (Throwable ignored) {}
+                            }
+                        }
+                    }
+                }
+            };
+            try { XposedBridge.hookAllMethods(notifRowClass, "setHeadsUpAnimatingAway", headsUpAnimatingAwayHook); } catch (Throwable ignored) {}
+
+            XC_MethodHook hunMotionHook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    View row = (View) param.thisObject;
+                    if (row != null) {
+                        boolean isHun = false;
+                        if (sIsPinnedMethod != null) {
+                            try { isHun = (Boolean) sIsPinnedMethod.invoke(row); } catch (Throwable ignored) {}
+                        }
+                        if (!isHun && sIsHeadsUpAnimatingAwayMethod != null) {
+                            try { isHun = (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(row); } catch (Throwable ignored) {}
+                        }
+                        if (isHun) {
+                            if (sBackgroundNormalField != null) {
+                                try {
+                                    View bgNormal = (View) sBackgroundNormalField.get(row);
+                                    if (bgNormal != null) bgNormal.invalidate();
+                                } catch (Throwable ignored) {}
+                            }
+                        }
+                    }
+                }
+            };
+            try { XposedBridge.hookAllMethods(notifRowClass, "setTranslationY", hunMotionHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "setTranslationX", hunMotionHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "setAlpha", hunMotionHook); } catch (Throwable ignored) {}
 
             if (notifShelfClass != null) {
                 try {
@@ -1431,24 +1491,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                         } catch (Throwable ignored) {}
                     }
 
-                    // 3. Screen awake / Sleep / AOD / Bouncer check:
-                    // If device is going to sleep, sleeping, on AOD, or Bouncer (PIN/password screen) is showing:
-                    // Set blur radius to 0 and let stock background draw or fade cleanly without blur!
-                    float stackAlpha = 1.0f;
-                    if (sNsslView != null) {
-                        try { stackAlpha = sNsslView.getAlpha(); } catch (Throwable ignored) {}
-                    }
-                    float rowAlpha = 1.0f;
-                    if (parent != null) {
-                        try { rowAlpha = parent.getAlpha(); } catch (Throwable ignored) {}
-                    }
-                    float bgAlpha = bgView.getAlpha();
-                    if (!sScreenAwake || sBouncerShowing || stackAlpha < 0.05f || rowAlpha < 0.05f || bgAlpha < 0.05f) {
-                        cleanupBlur(bgView);
-                        param.setResult(null);
-                        return;
-                    }
-
                     // 4. Fast direct method invocation on parent row / shelf
                     View row = parent;
                     while (row != null && notifRowClass != null && !notifRowClass.isAssignableFrom(row.getClass())
@@ -1512,6 +1554,15 @@ public class XposedInit implements IXposedHookLoadPackage {
                         if (!isHun && sIsHeadsUpStateMethod != null) {
                             try { isHun = (Boolean) sIsHeadsUpStateMethod.invoke(row); } catch (Throwable ignored) {}
                         }
+                        if (!isHun && sIsHeadsUpAnimatingAwayMethod != null) {
+                            try { isHun = (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(row); } catch (Throwable ignored) {}
+                        }
+                        if (!isHun) {
+                            try { isHun = (Boolean) XposedHelpers.callMethod(row, "isHeadsUpAnimatingAway"); } catch (Throwable ignored) {}
+                        }
+                        if (!isHun) {
+                            try { isHun = (Boolean) XposedHelpers.callMethod(row, "isHeadsUpOrAnimatingAway"); } catch (Throwable ignored) {}
+                        }
 
                         if (sIsColorizedMethod != null) {
                             try { isColorized = (Boolean) sIsColorizedMethod.invoke(row); } catch (Throwable ignored) {}
@@ -1522,6 +1573,54 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     if (sStatusBarState == 0 && !isHun) {
                         inShade = true;
+                    }
+
+                    // 3. Screen awake / Sleep / AOD / Bouncer check & dynamic alpha / dismissal tracking:
+                    float stackAlpha = 1.0f;
+                    if (sNsslView != null) {
+                        try { stackAlpha = sNsslView.getAlpha(); } catch (Throwable ignored) {}
+                    }
+                    float rowAlpha = 1.0f;
+                    if (row != null) {
+                        try { rowAlpha = row.getAlpha(); } catch (Throwable ignored) {}
+                    } else if (parent != null) {
+                        try { rowAlpha = parent.getAlpha(); } catch (Throwable ignored) {}
+                    }
+                    float bgAlpha = bgView.getAlpha();
+                    float effectiveAlpha = Math.max(0f, Math.min(1f, rowAlpha * bgAlpha));
+
+                    float motionFraction = 1.0f;
+                    if (isHun && row != null) {
+                        float transY = 0f;
+                        float transX = 0f;
+                        try {
+                            transY = row.getTranslationY();
+                            transX = Math.abs(row.getTranslationX());
+                        } catch (Throwable ignored) {}
+
+                        int actualH = 0;
+                        if (sActualHeightField != null) {
+                            try { actualH = sActualHeightField.getInt(bgView); } catch (Throwable ignored) {}
+                        }
+                        if (actualH <= 0 && sGetActualHeightMethod != null) {
+                            try { actualH = (Integer) sGetActualHeightMethod.invoke(row); } catch (Throwable ignored) {}
+                        }
+                        if (actualH <= 0) actualH = bgView.getHeight();
+
+                        if (transY < 0f && actualH > 0) {
+                            motionFraction = Math.min(motionFraction, Math.max(0f, 1.0f + (transY / (float) actualH)));
+                        }
+                        int bgW = bgView.getWidth();
+                        if (transX > 0f && bgW > 0) {
+                            motionFraction = Math.min(motionFraction, Math.max(0f, 1.0f - (transX / (float) bgW)));
+                        }
+                    }
+                    float combinedAlpha = effectiveAlpha * motionFraction;
+
+                    if (!sScreenAwake || sBouncerShowing || stackAlpha < 0.05f || combinedAlpha < 0.03f) {
+                        cleanupBlur(bgView);
+                        param.setResult(null);
+                        return;
                     }
 
                     // Target determination (Two-View Notification Architecture):
@@ -1711,11 +1810,16 @@ public class XposedInit implements IXposedHookLoadPackage {
                                 try { XposedHelpers.callMethod(blurDrawable, "setColor", 0); } catch (Throwable ignored) {}
                             }
 
+                            int dynamicRadius = Math.max(1, Math.round(160 * combinedAlpha));
                             if (sSetBlurRadiusMethod != null) {
-                                try { sSetBlurRadiusMethod.invoke(blurDrawable, 160); } catch (Throwable ignored) {}
+                                try { sSetBlurRadiusMethod.invoke(blurDrawable, dynamicRadius); } catch (Throwable ignored) {}
                             } else {
-                                try { XposedHelpers.callMethod(blurDrawable, "setBlurRadius", 160); } catch (Throwable ignored) {}
+                                try { XposedHelpers.callMethod(blurDrawable, "setBlurRadius", dynamicRadius); } catch (Throwable ignored) {}
                             }
+                            try {
+                                ((Drawable) blurDrawable).setAlpha(Math.round(255 * combinedAlpha));
+                            } catch (Throwable ignored) {}
+
                             if (sSetCornerRadiusMethod != null) {
                                 try { sSetCornerRadiusMethod.invoke(blurDrawable, topRadius, topRadius, bottomRadius, bottomRadius); } catch (Throwable ignored) {}
                             } else if (sSetCornerRadiusSingleMethod != null) {
@@ -1731,13 +1835,13 @@ public class XposedInit implements IXposedHookLoadPackage {
                         if (isShelf) {
                             frostedColor = isDark ? 0x38000000 : 0x40FFFFFF;
                         }
-                        glassTintPaint.setColor(frostedColor);
+                        int baseTintAlpha = Color.alpha(frostedColor);
+                        int animTintAlpha = Math.round(baseTintAlpha * combinedAlpha);
+                        glassTintPaint.setColor((frostedColor & 0x00FFFFFF) | (animTintAlpha << 24));
 
-                        if (isDark) {
-                            glassBorderPaint.setColor(isShelf ? 0x35FFFFFF : 0x28FFFFFF);
-                        } else {
-                            glassBorderPaint.setColor(0x45FFFFFF);
-                        }
+                        int baseBorderAlpha = isDark ? (isShelf ? 0x35 : 0x28) : 0x45;
+                        int animBorderAlpha = Math.round(baseBorderAlpha * combinedAlpha);
+                        glassBorderPaint.setColor((0x00FFFFFF) | (animBorderAlpha << 24));
                         glassBorderPaint.setStrokeWidth(1.0f * densityF);
 
                         canvas.drawPath(sClipPath, glassTintPaint);
@@ -2264,9 +2368,6 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     private static void cleanupBlur(View bgView) {
         if (bgView == null) return;
-        int targetColor = resolveStockNotifColor(bgView);
-        Log.i(TAG, "cleanupBlur: " + bgView.getClass().getSimpleName() + "@" + Integer.toHexString(bgView.hashCode())
-                + " targetColor=0x" + Integer.toHexString(targetColor));
         try {
             Object bd = null;
             if (sBackgroundBlurDrawableField != null) {
@@ -2281,13 +2382,15 @@ public class XposedInit implements IXposedHookLoadPackage {
                     try { XposedHelpers.callMethod(bd, "setBlurRadius", 0); } catch (Throwable ignored) {}
                 }
 
-                if (targetColor != 0) {
-                    if (sSetColorMethod != null) {
-                        try { sSetColorMethod.invoke(bd, targetColor); } catch (Throwable ignored) {}
-                    } else {
-                        try { XposedHelpers.callMethod(bd, "setColor", targetColor); } catch (Throwable ignored) {}
-                    }
+                if (sSetColorMethod != null) {
+                    try { sSetColorMethod.invoke(bd, 0); } catch (Throwable ignored) {}
+                } else {
+                    try { XposedHelpers.callMethod(bd, "setColor", 0); } catch (Throwable ignored) {}
                 }
+
+                try {
+                    ((Drawable) bd).setAlpha(0);
+                } catch (Throwable ignored) {}
 
                 try {
                     ((Drawable) bd).setVisible(false, false);
