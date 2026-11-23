@@ -1346,6 +1346,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                         if (!isHun && sIsHeadsUpAnimatingAwayMethod != null) {
                             try { isHun = (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(row); } catch (Throwable ignored) {}
                         }
+                        if (!isHun && sIsHeadsUpMethod != null) {
+                            try { isHun = (Boolean) sIsHeadsUpMethod.invoke(row); } catch (Throwable ignored) {}
+                        }
                         if (isHun) {
                             if (sBackgroundNormalField != null) {
                                 try {
@@ -1357,9 +1360,51 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
                 }
             };
-            try { XposedBridge.hookAllMethods(notifRowClass, "setTranslationY", hunMotionHook); } catch (Throwable ignored) {}
-            try { XposedBridge.hookAllMethods(notifRowClass, "setTranslationX", hunMotionHook); } catch (Throwable ignored) {}
-            try { XposedBridge.hookAllMethods(notifRowClass, "setAlpha", hunMotionHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "setTranslation", hunMotionHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "setActualHeight", hunMotionHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "setClipTopAmount", hunMotionHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "setClipBottomAmount", hunMotionHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "applyLaunchAnimationParams", hunMotionHook); } catch (Throwable ignored) {}
+
+            XC_MethodHook bgInvalidateHook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    View bgView = (View) param.thisObject;
+                    if (bgView != null) {
+                        bgView.invalidate();
+                    }
+                }
+            };
+            try { XposedBridge.hookAllMethods(notifBgClass, "setActualHeight", bgInvalidateHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifBgClass, "setClipTopAmount", bgInvalidateHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifBgClass, "setClipBottomAmount", bgInvalidateHook); } catch (Throwable ignored) {}
+
+            try {
+                Class<?> vsClass = cl.loadClass("com.android.systemui.statusbar.notification.stack.ViewState");
+                XposedBridge.hookAllMethods(vsClass, "applyToView", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args.length > 0 && param.args[0] instanceof View) {
+                            View row = (View) param.args[0];
+                            if (notifRowClass != null && notifRowClass.isAssignableFrom(row.getClass())) {
+                                boolean isHun = false;
+                                if (sIsPinnedMethod != null) {
+                                    try { isHun = (Boolean) sIsPinnedMethod.invoke(row); } catch (Throwable ignored) {}
+                                }
+                                if (!isHun && sIsHeadsUpAnimatingAwayMethod != null) {
+                                    try { isHun = (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(row); } catch (Throwable ignored) {}
+                                }
+                                if (isHun && sBackgroundNormalField != null) {
+                                    try {
+                                        View bgNormal = (View) sBackgroundNormalField.get(row);
+                                        if (bgNormal != null) bgNormal.invalidate();
+                                    } catch (Throwable ignored) {}
+                                }
+                            }
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {}
 
             if (notifShelfClass != null) {
                 try {
@@ -1595,6 +1640,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                         float transX = 0f;
                         try {
                             transY = row.getTranslationY();
+                            if (transY == 0f) {
+                                Object t = XposedHelpers.callMethod(row, "getTranslation");
+                                if (t instanceof Float) transY = (Float) t;
+                            }
                             transX = Math.abs(row.getTranslationX());
                         } catch (Throwable ignored) {}
 
@@ -1701,7 +1750,15 @@ public class XposedInit implements IXposedHookLoadPackage {
                         try {
                             int rh = (sGetActualHeightMethod != null) ? (Integer) sGetActualHeightMethod.invoke(row)
                                     : (Integer) XposedHelpers.callMethod(row, "getActualHeight");
-                            if (rh > actualHeight) actualHeight = rh;
+                            boolean animatingAway = false;
+                            if (sIsHeadsUpAnimatingAwayMethod != null) {
+                                try { animatingAway = (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(row); } catch (Throwable ignored) {}
+                            }
+                            if (!animatingAway && rh > actualHeight) {
+                                actualHeight = rh;
+                            } else if (actualHeight <= 0) {
+                                actualHeight = rh;
+                            }
                         } catch (Throwable ignored) {}
                     }
                     if (actualHeight <= 0) actualHeight = bgView.getHeight();
@@ -1711,7 +1768,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                         try { clipTop = sClipTopAmountField.getInt(bgView); } catch (Throwable ignored) {}
                     }
                     int clipBottom = 0;
-                    if (!isHun && sClipBottomAmountField != null) {
+                    if (sClipBottomAmountField != null) {
                         try { clipBottom = sClipBottomAmountField.getInt(bgView); } catch (Throwable ignored) {}
                     }
 
@@ -1728,6 +1785,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     int drawBottom = clipBottom > 0 ? (actualHeight - clipBottom) : actualHeight;
 
                     if (drawRight <= drawLeft || drawBottom <= drawTop) {
+                        cleanupBlur(bgView);
                         param.setResult(null);
                         return;
                     }
