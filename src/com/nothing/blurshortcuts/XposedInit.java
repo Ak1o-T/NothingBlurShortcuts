@@ -1,5 +1,6 @@
 package com.nothing.blurshortcuts;
 
+import android.animation.ValueAnimator;
 import android.app.Application;
 import android.content.Context;
 import android.content.res.Configuration;
@@ -138,6 +139,11 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static Method sGetTopCornerRadiusMethod = null;
     private static Method sGetBottomCornerRadiusMethod = null;
     private static Method sSetColorMethod = null;
+    private static Method sGetOutlineRectMethod = null;
+    private static Method sGetOutlineAlphaMethod = null;
+    private static Method sHasCustomOutlineMethod = null;
+    private static Method sGetAppearAnimationFractionMethod = null;
+    private static Method sIsDrawingAppearAnimationMethod = null;
     private static Field sShelfActualWidthField = null;
 
     private static Object sLucentColorUtilsInstance = null;
@@ -1239,6 +1245,14 @@ public class XposedInit implements IXposedHookLoadPackage {
                 Class<?> anvCls = cl.loadClass("com.android.systemui.statusbar.notification.row.ActivatableNotificationView");
                 sIsOnKeyguardMethod = anvCls.getMethod("isOnKeyguard");
                 sIsOnKeyguardMethod.setAccessible(true);
+                try { sGetAppearAnimationFractionMethod = anvCls.getMethod("getAppearAnimationFraction"); sGetAppearAnimationFractionMethod.setAccessible(true); } catch (Throwable ignored) {}
+                try { sIsDrawingAppearAnimationMethod = anvCls.getMethod("isDrawingAppearAnimation"); sIsDrawingAppearAnimationMethod.setAccessible(true); } catch (Throwable ignored) {}
+            } catch (Throwable ignored) {}
+            try {
+                Class<?> eovCls = cl.loadClass("com.android.systemui.statusbar.notification.row.ExpandableOutlineView");
+                try { sGetOutlineRectMethod = eovCls.getMethod("getOutlineRect"); sGetOutlineRectMethod.setAccessible(true); } catch (Throwable ignored) {}
+                try { sGetOutlineAlphaMethod = eovCls.getMethod("getOutlineAlpha"); sGetOutlineAlphaMethod.setAccessible(true); } catch (Throwable ignored) {}
+                try { sHasCustomOutlineMethod = eovCls.getMethod("hasCustomOutline"); sHasCustomOutlineMethod.setAccessible(true); } catch (Throwable ignored) {}
             } catch (Throwable ignored) {}
             try { sIsColorizedMethod = notifRowClass.getMethod("isColorized"); sIsColorizedMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sGetTopCornerRadiusMethod = notifRowClass.getMethod("getTopCornerRadius"); sGetTopCornerRadiusMethod.setAccessible(true); } catch (Throwable ignored) {}
@@ -1401,6 +1415,146 @@ public class XposedInit implements IXposedHookLoadPackage {
                                     } catch (Throwable ignored) {}
                                 }
                             }
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {}
+
+            // Hook ActivatableNotificationView appear animations to keep blur synchronized frame-by-frame
+            try {
+                Class<?> anvCls = cl.loadClass("com.android.systemui.statusbar.notification.row.ActivatableNotificationView");
+                XC_MethodHook appearInvalidateHook = new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        View row = (View) param.thisObject;
+                        if (row != null && sBackgroundNormalField != null) {
+                            try {
+                                View bgNormal = (View) sBackgroundNormalField.get(row);
+                                if (bgNormal != null) bgNormal.invalidate();
+                            } catch (Throwable ignored) {}
+                        }
+                    }
+                };
+                try { XposedBridge.hookAllMethods(anvCls, "setAppearAnimationFraction", appearInvalidateHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(anvCls, "startAppearAnimation", appearInvalidateHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(anvCls, "updateAppearRect", appearInvalidateHook); } catch (Throwable ignored) {}
+                try {
+                    XposedBridge.hookAllMethods(anvCls, "onAppearAnimationFinished", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            boolean isAppearing = true;
+                            if (param.args.length > 0 && param.args[0] instanceof Boolean) {
+                                isAppearing = (Boolean) param.args[0];
+                            }
+                            View row = (View) param.thisObject;
+                            if (row != null && !isAppearing) {
+                                if (sBackgroundNormalField != null) {
+                                    try {
+                                        View bgNormal = (View) sBackgroundNormalField.get(row);
+                                        if (bgNormal != null) cleanupBlur(bgNormal);
+                                    } catch (Throwable ignored) {}
+                                }
+                            }
+                        }
+                    });
+                } catch (Throwable ignored) {}
+            } catch (Throwable ignored) {}
+
+            // Hook PropertyAnimator to track every animated property on notification rows (translationY, scale, alpha)
+            try {
+                Class<?> paCls = cl.loadClass("com.android.systemui.statusbar.notification.PropertyAnimator");
+                Class<?> apCls = cl.loadClass("com.android.systemui.statusbar.notification.AnimatableProperty");
+                final Method getAnimTagMethod = apCls.getMethod("getAnimatorTag");
+                getAnimTagMethod.setAccessible(true);
+                XposedBridge.hookAllMethods(paCls, "startAnimation", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args.length > 1 && param.args[0] instanceof View && param.args[1] != null) {
+                            final View targetView = (View) param.args[0];
+                            if (notifRowClass != null && notifRowClass.isAssignableFrom(targetView.getClass())) {
+                                int tag = (Integer) getAnimTagMethod.invoke(param.args[1]);
+                                Object anim = targetView.getTag(tag);
+                                if (anim instanceof ValueAnimator) {
+                                    ValueAnimator va = (ValueAnimator) anim;
+                                    va.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+                                        @Override
+                                        public void onAnimationUpdate(ValueAnimator animation) {
+                                            if (sBackgroundNormalField != null) {
+                                                try {
+                                                    View bgNormal = (View) sBackgroundNormalField.get(targetView);
+                                                    if (bgNormal != null) bgNormal.invalidate();
+                                                } catch (Throwable ignored) {}
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {}
+
+            // Hook HeadsUpTouchHelper fly away and touch tracking
+            try {
+                Class<?> hthCls = cl.loadClass("com.android.systemui.statusbar.notification.headsup.HeadsUpTouchHelper");
+                final Field snoozeFlyAnimField = hthCls.getDeclaredField("mSnoozeFlyAnimator");
+                snoozeFlyAnimField.setAccessible(true);
+                final Field pickedChildField = hthCls.getDeclaredField("mPickedChild");
+                pickedChildField.setAccessible(true);
+                XposedBridge.hookAllMethods(hthCls, "startSnoozeFly", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        ValueAnimator anim = (ValueAnimator) snoozeFlyAnimField.get(param.thisObject);
+                        if (anim != null) {
+                            final View row = (View) pickedChildField.get(param.thisObject);
+                            anim.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+                                @Override
+                                public void onAnimationUpdate(ValueAnimator animation) {
+                                    if (row != null && sBackgroundNormalField != null) {
+                                        try {
+                                            View bgNormal = (View) sBackgroundNormalField.get(row);
+                                            if (bgNormal != null) bgNormal.invalidate();
+                                        } catch (Throwable ignored) {}
+                                    }
+                                }
+                            });
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {}
+
+            // Hook HeadsUpTouchHelperEx for Nothing OS pop window and gesture animations
+            try {
+                Class<?> hthExCls = cl.loadClass("com.nothing.systemui.statusbar.phone.HeadsUpTouchHelperEx");
+                XC_MethodHook exUpdateHook = new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.args.length > 0 && param.args[param.args.length - 1] instanceof View) {
+                            View row = (View) param.args[param.args.length - 1];
+                            if (sBackgroundNormalField != null) {
+                                try {
+                                    View bgNormal = (View) sBackgroundNormalField.get(row);
+                                    if (bgNormal != null) bgNormal.invalidate();
+                                } catch (Throwable ignored) {}
+                            }
+                        }
+                    }
+                };
+                try { XposedBridge.hookAllMethods(hthExCls, "updateSourceView", exUpdateHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(hthExCls, "updateChildView", exUpdateHook); } catch (Throwable ignored) {}
+            } catch (Throwable ignored) {}
+
+            // Cleanup blur immediately when row is detached from window
+            try {
+                XposedBridge.hookAllMethods(notifRowClass, "onDetachedFromWindow", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        View row = (View) param.thisObject;
+                        if (row != null && sBackgroundNormalField != null) {
+                            try {
+                                View bgNormal = (View) sBackgroundNormalField.get(row);
+                                if (bgNormal != null) cleanupBlur(bgNormal);
+                            } catch (Throwable ignored) {}
                         }
                     }
                 });
@@ -1634,6 +1788,31 @@ public class XposedInit implements IXposedHookLoadPackage {
                     float bgAlpha = bgView.getAlpha();
                     float effectiveAlpha = Math.max(0f, Math.min(1f, rowAlpha * bgAlpha));
 
+                    boolean isAppearingOrDisappearing = false;
+                    float appearFraction = 1.0f;
+                    if (row != null && sIsDrawingAppearAnimationMethod != null) {
+                        try {
+                            isAppearingOrDisappearing = (Boolean) sIsDrawingAppearAnimationMethod.invoke(row);
+                            if (sGetAppearAnimationFractionMethod != null) {
+                                appearFraction = (Float) sGetAppearAnimationFractionMethod.invoke(row);
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+
+                    float outlineAlpha = 1.0f;
+                    if (row != null && sGetOutlineAlphaMethod != null) {
+                        try {
+                            outlineAlpha = (Float) sGetOutlineAlphaMethod.invoke(row);
+                        } catch (Throwable ignored) {}
+                    }
+
+                    // Suppress blur completely before appear animation starts (eliminates static pop-in rectangle)
+                    if (isHun && isAppearingOrDisappearing && appearFraction < 0.05f) {
+                        cleanupBlur(bgView);
+                        param.setResult(null);
+                        return;
+                    }
+
                     float motionFraction = 1.0f;
                     if (isHun && row != null) {
                         float transY = 0f;
@@ -1664,7 +1843,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                             motionFraction = Math.min(motionFraction, Math.max(0f, 1.0f - (transX / (float) bgW)));
                         }
                     }
-                    float combinedAlpha = effectiveAlpha * motionFraction;
+
+                    float animFractionMultiplier = isAppearingOrDisappearing ? Math.max(0f, Math.min(1f, appearFraction)) : 1.0f;
+                    float combinedAlpha = effectiveAlpha * motionFraction * Math.max(0f, Math.min(1f, outlineAlpha)) * animFractionMultiplier;
 
                     if (!sScreenAwake || sBouncerShowing || stackAlpha < 0.05f || combinedAlpha < 0.03f) {
                         cleanupBlur(bgView);
@@ -1779,10 +1960,33 @@ public class XposedInit implements IXposedHookLoadPackage {
                         } catch (Throwable ignored) {}
                     }
 
-                    int drawLeft = alignedRight ? (bgView.getWidth() - actualWidth) : 0;
-                    int drawRight = alignedRight ? bgView.getWidth() : actualWidth;
-                    int drawTop = Math.max(bgTop, clipTop);
-                    int drawBottom = clipBottom > 0 ? (actualHeight - clipBottom) : actualHeight;
+                    Rect outlineRect = null;
+                    boolean hasCustomOutline = false;
+                    if (row != null && sHasCustomOutlineMethod != null) {
+                        try {
+                            hasCustomOutline = (Boolean) sHasCustomOutlineMethod.invoke(row);
+                            if (hasCustomOutline && sGetOutlineRectMethod != null) {
+                                outlineRect = (Rect) sGetOutlineRectMethod.invoke(row);
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+
+                    int drawLeft;
+                    int drawRight;
+                    int drawTop;
+                    int drawBottom;
+
+                    if (hasCustomOutline && outlineRect != null && !outlineRect.isEmpty()) {
+                        drawLeft = outlineRect.left;
+                        drawRight = outlineRect.right;
+                        drawTop = outlineRect.top;
+                        drawBottom = outlineRect.bottom;
+                    } else {
+                        drawLeft = alignedRight ? (bgView.getWidth() - actualWidth) : 0;
+                        drawRight = alignedRight ? bgView.getWidth() : actualWidth;
+                        drawTop = Math.max(bgTop, clipTop);
+                        drawBottom = clipBottom > 0 ? (actualHeight - clipBottom) : actualHeight;
+                    }
 
                     if (drawRight <= drawLeft || drawBottom <= drawTop) {
                         cleanupBlur(bgView);
@@ -1811,6 +2015,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                             } catch (Throwable ignored) {}
                         }
                     }
+
+                    float maxRadius = (drawBottom - drawTop) / 2.0f;
+                    if (topRadius > maxRadius) topRadius = maxRadius;
+                    if (bottomRadius > maxRadius) bottomRadius = maxRadius;
 
                     // Reusable fast draw path (zero GC allocations)
                     sDrawRectF.set(drawLeft, drawTop, drawRight, drawBottom);
@@ -1955,7 +2163,7 @@ public class XposedInit implements IXposedHookLoadPackage {
             };
             XC_MethodHook unregisterBgViewHook = new XC_MethodHook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                     if (param.thisObject instanceof View) {
                         View v = (View) param.thisObject;
                         cleanupBlur(v);
@@ -2452,6 +2660,20 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                 try {
                     ((Drawable) bd).setVisible(false, false);
+                } catch (Throwable ignored) {}
+
+                // Force layout/draw traversal on ViewRootImpl so Aggregator submits the zeroed/removed blur region to SurfaceFlinger
+                bgView.invalidate();
+                View root = bgView.getRootView();
+                if (root != null) {
+                    root.invalidate();
+                }
+                try {
+                    Object vri = (sGetViewRootImplMethod != null) ? sGetViewRootImplMethod.invoke(bgView)
+                            : XposedHelpers.callMethod(bgView, "getViewRootImpl");
+                    if (vri != null) {
+                        XposedHelpers.callMethod(vri, "scheduleTraversals");
+                    }
                 } catch (Throwable ignored) {}
             }
         } catch (Throwable ignored) {}
