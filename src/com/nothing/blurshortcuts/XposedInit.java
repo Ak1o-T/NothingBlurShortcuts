@@ -1438,26 +1438,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                 try { XposedBridge.hookAllMethods(anvCls, "setAppearAnimationFraction", appearInvalidateHook); } catch (Throwable ignored) {}
                 try { XposedBridge.hookAllMethods(anvCls, "startAppearAnimation", appearInvalidateHook); } catch (Throwable ignored) {}
                 try { XposedBridge.hookAllMethods(anvCls, "updateAppearRect", appearInvalidateHook); } catch (Throwable ignored) {}
-                try {
-                    XposedBridge.hookAllMethods(anvCls, "onAppearAnimationFinished", new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            boolean isAppearing = true;
-                            if (param.args.length > 0 && param.args[0] instanceof Boolean) {
-                                isAppearing = (Boolean) param.args[0];
-                            }
-                            View row = (View) param.thisObject;
-                            if (row != null && !isAppearing) {
-                                if (sBackgroundNormalField != null) {
-                                    try {
-                                        View bgNormal = (View) sBackgroundNormalField.get(row);
-                                        if (bgNormal != null) cleanupBlur(bgNormal);
-                                    } catch (Throwable ignored) {}
-                                }
-                            }
-                        }
-                    });
-                } catch (Throwable ignored) {}
+// onAppearAnimationFinished hook removed to avoid premature blur cleanup
             } catch (Throwable ignored) {}
 
             // Hook PropertyAnimator to track every animated property on notification rows (translationY, scale, alpha)
@@ -1788,29 +1769,20 @@ public class XposedInit implements IXposedHookLoadPackage {
                     float bgAlpha = bgView.getAlpha();
                     float effectiveAlpha = Math.max(0f, Math.min(1f, rowAlpha * bgAlpha));
 
-                    boolean isAppearingOrDisappearing = false;
-                    float appearFraction = 1.0f;
-                    if (row != null && sIsDrawingAppearAnimationMethod != null) {
+                    float animFractionMultiplier = 1.0f;
+                    if (isHun && row != null && sIsDrawingAppearAnimationMethod != null) {
                         try {
-                            isAppearingOrDisappearing = (Boolean) sIsDrawingAppearAnimationMethod.invoke(row);
-                            if (sGetAppearAnimationFractionMethod != null) {
-                                appearFraction = (Float) sGetAppearAnimationFractionMethod.invoke(row);
+                            boolean isAppearing = (Boolean) sIsDrawingAppearAnimationMethod.invoke(row);
+                            if (isAppearing && sGetAppearAnimationFractionMethod != null) {
+                                float frac = (Float) sGetAppearAnimationFractionMethod.invoke(row);
+                                if (frac < 0.05f) {
+                                    cleanupBlur(bgView);
+                                    param.setResult(null);
+                                    return;
+                                }
+                                animFractionMultiplier = Math.max(0.05f, Math.min(1.0f, frac));
                             }
                         } catch (Throwable ignored) {}
-                    }
-
-                    float outlineAlpha = 1.0f;
-                    if (row != null && sGetOutlineAlphaMethod != null) {
-                        try {
-                            outlineAlpha = (Float) sGetOutlineAlphaMethod.invoke(row);
-                        } catch (Throwable ignored) {}
-                    }
-
-                    // Suppress blur completely before appear animation starts (eliminates static pop-in rectangle)
-                    if (isHun && isAppearingOrDisappearing && appearFraction < 0.05f) {
-                        cleanupBlur(bgView);
-                        param.setResult(null);
-                        return;
                     }
 
                     float motionFraction = 1.0f;
@@ -1844,8 +1816,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
                     }
 
-                    float animFractionMultiplier = isAppearingOrDisappearing ? Math.max(0f, Math.min(1f, appearFraction)) : 1.0f;
-                    float combinedAlpha = effectiveAlpha * motionFraction * Math.max(0f, Math.min(1f, outlineAlpha)) * animFractionMultiplier;
+                    float combinedAlpha = effectiveAlpha * motionFraction * animFractionMultiplier;
 
                     if (!sScreenAwake || sBouncerShowing || stackAlpha < 0.05f || combinedAlpha < 0.03f) {
                         cleanupBlur(bgView);
@@ -1960,33 +1931,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                         } catch (Throwable ignored) {}
                     }
 
-                    Rect outlineRect = null;
-                    boolean hasCustomOutline = false;
-                    if (row != null && sHasCustomOutlineMethod != null) {
-                        try {
-                            hasCustomOutline = (Boolean) sHasCustomOutlineMethod.invoke(row);
-                            if (hasCustomOutline && sGetOutlineRectMethod != null) {
-                                outlineRect = (Rect) sGetOutlineRectMethod.invoke(row);
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-
-                    int drawLeft;
-                    int drawRight;
-                    int drawTop;
-                    int drawBottom;
-
-                    if (hasCustomOutline && outlineRect != null && !outlineRect.isEmpty()) {
-                        drawLeft = outlineRect.left;
-                        drawRight = outlineRect.right;
-                        drawTop = outlineRect.top;
-                        drawBottom = outlineRect.bottom;
-                    } else {
-                        drawLeft = alignedRight ? (bgView.getWidth() - actualWidth) : 0;
-                        drawRight = alignedRight ? bgView.getWidth() : actualWidth;
-                        drawTop = Math.max(bgTop, clipTop);
-                        drawBottom = clipBottom > 0 ? (actualHeight - clipBottom) : actualHeight;
-                    }
+                    int drawLeft = alignedRight ? (bgView.getWidth() - actualWidth) : 0;
+                    int drawRight = alignedRight ? bgView.getWidth() : actualWidth;
+                    int drawTop = Math.max(bgTop, clipTop);
+                    int drawBottom = clipBottom > 0 ? (actualHeight - clipBottom) : actualHeight;
 
                     if (drawRight <= drawLeft || drawBottom <= drawTop) {
                         cleanupBlur(bgView);
@@ -2662,12 +2610,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                     ((Drawable) bd).setVisible(false, false);
                 } catch (Throwable ignored) {}
 
-                // Force layout/draw traversal on ViewRootImpl so Aggregator submits the zeroed/removed blur region to SurfaceFlinger
-                bgView.invalidate();
-                View root = bgView.getRootView();
-                if (root != null) {
-                    root.invalidate();
-                }
                 try {
                     Object vri = (sGetViewRootImplMethod != null) ? sGetViewRootImplMethod.invoke(bgView)
                             : XposedHelpers.callMethod(bgView, "getViewRootImpl");
