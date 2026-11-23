@@ -672,7 +672,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
                 }
             };
-            try { XposedBridge.hookAllConstructors(captionsBtnCls, styleBtnHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(captionsBtnCls, "onAttachedToWindow", styleBtnHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(captionsBtnCls, "setVisibility", styleBtnHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(captionsBtnCls, "setCaptionsEnabled", styleBtnHook); } catch (Throwable ignored) {}
@@ -2429,8 +2428,20 @@ public class XposedInit implements IXposedHookLoadPackage {
                     applyFrostedGlassToDrawable(parentView.getBackground(), tintColor, strokeWidth, strokeColor);
                 }
             }
-            // Clear inner toggle button background so the frosted capsule shines through without an opaque grey box
-            v.setBackground(null);
+            // Keep the button's background as TransitionDrawable to avoid NullPointerException in SystemUI Kotlin casts!
+            // Simply set all its layers to transparent so the parent's frosted capsule shows through.
+            Drawable btnBg = v.getBackground();
+            if (btnBg instanceof android.graphics.drawable.TransitionDrawable) {
+                android.graphics.drawable.TransitionDrawable td = (android.graphics.drawable.TransitionDrawable) btnBg;
+                for (int i = 0; i < td.getNumberOfLayers(); i++) {
+                    Drawable d = td.getDrawable(i);
+                    if (d instanceof android.graphics.drawable.GradientDrawable) {
+                        ((android.graphics.drawable.GradientDrawable) d).setColor(0x00000000);
+                    }
+                }
+            } else if (btnBg != null) {
+                applyFrostedGlassToDrawable(btnBg, tintColor, strokeWidth, strokeColor);
+            }
             return;
         }
         if (v instanceof ViewGroup) {
