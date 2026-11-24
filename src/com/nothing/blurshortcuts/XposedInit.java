@@ -2015,14 +2015,8 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
                     }
 
-                    float shadeProgress = 0f;
-                    if (sStatusBarState == 2 || sStatusBarState == 0) {
-                        shadeProgress = 1.0f;
-                    } else if (sStatusBarState == 1) {
-                        shadeProgress = Math.max(0f, Math.min(1f, Math.max(sLsToShadeProgress, sFractionToShade)));
-                    }
-
-                    boolean isHun = !isShelf && isRowHun(row);
+                    float shadeProgress = getShadeProgress();
+                    boolean isHun = !isShelf && (shadeProgress < 0.05f) && isRowHun(row);
                     boolean isColorized = false;
                     if (!isShelf && row != null) {
                         Object colTag = row.getTag(TAG_KEY_IS_COLORIZED);
@@ -2253,6 +2247,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                         Drawable bg = null;
                         if (sBackgroundField != null) {
                             try { bg = (Drawable) sBackgroundField.get(bgView); } catch (Throwable ignored) {}
+                        }
+                        if (bg == null) {
+                            try { bg = (Drawable) XposedHelpers.getObjectField(bgView, "mBackground"); } catch (Throwable ignored) {}
                         }
                         if (bg != null) {
                             bg.setBounds(drawLeft, drawTop, drawRight, drawBottom);
@@ -2842,22 +2839,43 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
     }
 
+    private static float getShadeProgress() {
+        if (sStatusBarState == 0 || sStatusBarState == 2) {
+            return 1.0f;
+        }
+        float progress = Math.max(sLsToShadeProgress, sFractionToShade);
+        if (sAmbientState != null) {
+            try {
+                Object exp = XposedHelpers.callMethod(sAmbientState, "getExpansionFraction");
+                if (exp instanceof Float) {
+                    float f = (Float) exp;
+                    if (f > progress) progress = f;
+                }
+            } catch (Throwable ignored) {}
+            try {
+                Object exp = XposedHelpers.callMethod(sAmbientState, "isShadeExpanded");
+                if (Boolean.TRUE.equals(exp)) return 1.0f;
+            } catch (Throwable ignored) {}
+        }
+        if (sNsslView != null) {
+            try {
+                if (sNsslIsExpandedMethod != null && (Boolean) sNsslIsExpandedMethod.invoke(sNsslView)) {
+                    return 1.0f;
+                }
+            } catch (Throwable ignored) {}
+        }
+        return Math.max(0f, Math.min(1f, progress));
+    }
+
     private static boolean isRowHun(View row) {
         if (row == null) return false;
         try {
             if (sIsPinnedMethod != null && (Boolean) sIsPinnedMethod.invoke(row)) return true;
         } catch (Throwable ignored) {}
         try {
-            if (sIsHeadsUpMethod != null && (Boolean) sIsHeadsUpMethod.invoke(row)) return true;
-        } catch (Throwable ignored) {}
-        try {
-            if (sIsHeadsUpStateMethod != null && (Boolean) sIsHeadsUpStateMethod.invoke(row)) return true;
-        } catch (Throwable ignored) {}
-        try {
             if (sIsHeadsUpAnimatingAwayMethod != null && (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(row)) return true;
         } catch (Throwable ignored) {}
-        Object tag = row.getTag(TAG_KEY_IS_HUN);
-        return Boolean.TRUE.equals(tag);
+        return false;
     }
 
     private static void onLsToShadeProgressChanged(float progress) {
