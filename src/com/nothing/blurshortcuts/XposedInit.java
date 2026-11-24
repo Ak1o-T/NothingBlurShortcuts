@@ -2897,10 +2897,9 @@ public class XposedInit implements IXposedHookLoadPackage {
     }
 
     /**
-     * Mode 3: Floating Heads-Up Notification Card (Version 3 - Heads-Up Floating Alert)
-     * SurfaceFlinger BackgroundBlurDrawable (blurs live running apps / content underneath)
-     * Combined with authentic Nothing OS translucent Lucent frosted tint & specular border.
-     * Rendered directly onto the view canvas for hardware-accelerated 120Hz lag-free animation.
+     * Mode 3: Floating Heads-Up Notification Card (Option 2 - Lucent Translucent Glass)
+     * Authentic Nothing OS translucent Lucent glass plate with specular highlight border.
+     * Rendered directly onto the view canvas for zero-lag 120Hz butter-smooth animation.
      */
     private static void renderHeadsUpCard(
             Canvas canvas, View bgView, View row,
@@ -2908,6 +2907,16 @@ public class XposedInit implements IXposedHookLoadPackage {
             float topRadius, float bottomRadius, Path clipPath,
             boolean isDark, float densityF, float combinedAlpha) {
         bgView.setTag(TAG_KEY_BLUR_ACTIVE, Boolean.TRUE);
+
+        // Ensure any previous SurfaceFlinger blur drawable is muted to eliminate animation lag
+        Object bbd = bgView.getTag(TAG_KEY_BLUR_DRAWABLE);
+        if (bbd instanceof Drawable) {
+            try {
+                Drawable d = (Drawable) bbd;
+                d.setAlpha(0);
+                d.setVisible(false, false);
+            } catch (Throwable ignored) {}
+        }
 
         // Frame-synchronized 120Hz tracking for Heads-Up notification appearance, dismissal and gestures
         synchronized (sHunPreDrawListeners) {
@@ -2922,61 +2931,18 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
 
         Context ctx = bgView.getContext();
-        ensureBlurReflection(ctx != null ? ctx.getClassLoader() : null);
 
-        // 1. Get or create BackgroundBlurDrawable for live window background blur (SurfaceFlinger)
-        // This blurs whatever is actively on screen behind the notification (apps, games, YouTube, etc.)
-        Drawable blurDrawable = (Drawable) bgView.getTag(TAG_KEY_BLUR_DRAWABLE);
-        if (blurDrawable == null && sCreateBackgroundBlurDrawableMethod != null) {
-            Object vri = null;
-            if (sGetViewRootImplMethod != null) {
-                try { vri = sGetViewRootImplMethod.invoke(bgView); } catch (Throwable ignored) {}
-            }
-            if (vri == null && bgView.getRootView() != null && sGetViewRootImplMethod != null) {
-                try { vri = sGetViewRootImplMethod.invoke(bgView.getRootView()); } catch (Throwable ignored) {}
-            }
-            if (vri == null && row != null && sGetViewRootImplMethod != null) {
-                try { vri = sGetViewRootImplMethod.invoke(row); } catch (Throwable ignored) {}
-            }
-            if (vri != null) {
-                try {
-                    Object created = sCreateBackgroundBlurDrawableMethod.invoke(vri);
-                    if (created instanceof Drawable) {
-                        blurDrawable = (Drawable) created;
-                        bgView.setTag(TAG_KEY_BLUR_DRAWABLE, blurDrawable);
-                    }
-                } catch (Throwable t) {
-                    Log.e(TAG, "Failed creating BackgroundBlurDrawable for HUN: " + t);
-                }
-            }
+        // 1. Translucent frosted glass plate (shows underlying running app content with high contrast)
+        // Dark: ~80% solid dark plate, Light: ~85% solid light plate
+        int basePlateColor = isDark ? 0xCC1E1E1E : 0xDCF4F4F2;
+        int baseAlpha = Color.alpha(basePlateColor);
+        int animBaseAlpha = Math.round(baseAlpha * combinedAlpha);
+        if (animBaseAlpha > 0) {
+            solidBgPaint.setColor((basePlateColor & 0x00FFFFFF) | (animBaseAlpha << 24));
+            canvas.drawPath(clipPath, solidBgPaint);
         }
 
-        // 2. Draw live window background blur
-        int alpha255 = Math.max(0, Math.min(255, Math.round(255 * combinedAlpha)));
-        if (blurDrawable != null) {
-            int blurRadius = Math.round(26.0f * densityF);
-            if (sSetBlurRadiusMethod != null) {
-                try { sSetBlurRadiusMethod.invoke(blurDrawable, blurRadius); } catch (Throwable ignored) {}
-            }
-            if (sSetCornerRadiusMethod != null) {
-                try {
-                    sSetCornerRadiusMethod.invoke(blurDrawable, topRadius, topRadius, bottomRadius, bottomRadius);
-                } catch (Throwable ignored) {
-                    if (sSetCornerRadiusSingleMethod != null) {
-                        try { sSetCornerRadiusSingleMethod.invoke(blurDrawable, topRadius); } catch (Throwable ignored2) {}
-                    }
-                }
-            } else if (sSetCornerRadiusSingleMethod != null) {
-                try { sSetCornerRadiusSingleMethod.invoke(blurDrawable, topRadius); } catch (Throwable ignored) {}
-            }
-
-            blurDrawable.setBounds(drawLeft, drawTop, drawRight, drawBottom);
-            blurDrawable.setAlpha(alpha255);
-            blurDrawable.setVisible(alpha255 > 0, false);
-            blurDrawable.draw(canvas);
-        }
-
-        // 3. Render authentic Nothing OS translucent frosted tint over the blur
+        // 2. Authentic Nothing OS Lucent frosted tint highlight overlay
         int frostedColor = getFrostedBackdropColor(ctx, isDark);
         int baseTintAlpha = Color.alpha(frostedColor);
         int animTintAlpha = Math.round(baseTintAlpha * combinedAlpha);
@@ -2985,8 +2951,8 @@ public class XposedInit implements IXposedHookLoadPackage {
             canvas.drawPath(clipPath, glassTintPaint);
         }
 
-        // 4. Crisp specular glass border highlight (Nothing OS design signature)
-        int borderColor = isDark ? 0x22FFFFFF : 0x30FFFFFF;
+        // 3. Crisp specular glass border highlight (Nothing OS design signature)
+        int borderColor = isDark ? 0x2EFFFFFF : 0x30FFFFFF;
         int borderAlpha = Math.round(Color.alpha(borderColor) * combinedAlpha);
         if (borderAlpha > 0) {
             glassBorderPaint.setColor((borderColor & 0x00FFFFFF) | (borderAlpha << 24));
@@ -2994,7 +2960,7 @@ public class XposedInit implements IXposedHookLoadPackage {
             canvas.drawPath(clipPath, glassBorderPaint);
         }
 
-        // 5. Ripple effect for touch feedback on floating HUN cards
+        // 4. Ripple effect for touch feedback on floating HUN cards
         Drawable ripple = (Drawable) bgView.getTag(TAG_KEY_RIPPLE);
         if (ripple == null) {
             try {
