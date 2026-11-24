@@ -555,7 +555,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                                         glassBorderPaint.setColor(0x28FFFFFF);
                                     } else {
                                         // Light theme: translucent milky white glass overlay + specular edge rim
-                                        glassTintPaint.setColor(0x70FFFFFF);
+                                        glassTintPaint.setColor(0x85FFFFFF);
                                         glassBorderPaint.setColor(0x38FFFFFF);
                                     }
 
@@ -1881,12 +1881,19 @@ public class XposedInit implements IXposedHookLoadPackage {
                     // Child rows inside NotificationChildrenContainer must NEVER draw their own backgrounds;
                     // the top-level parent summary row already draws the unified card background for the whole group.
                     if (!isShelf) {
-                        if (sIdBackgroundDimmed <= 0 && ctx.getResources() != null) {
+                        int bgId = bgView.getId();
+                        String bgResName = null;
+                        if (bgId > 0 && ctx != null && ctx.getResources() != null) {
                             try {
-                                sIdBackgroundDimmed = ctx.getResources().getIdentifier("backgroundDimmed", "id", "com.android.systemui");
+                                bgResName = ctx.getResources().getResourceEntryName(bgId);
                             } catch (Throwable ignored) {}
                         }
-                        if (sIdBackgroundDimmed > 0 && bgView.getId() == sIdBackgroundDimmed) {
+                        if ("backgroundDimmed".equals(bgResName)) {
+                            cleanupBlur(bgView);
+                            param.setResult(null);
+                            return;
+                        }
+                        if (bgResName != null && !"backgroundNormal".equals(bgResName)) {
                             cleanupBlur(bgView);
                             param.setResult(null);
                             return;
@@ -1895,8 +1902,20 @@ public class XposedInit implements IXposedHookLoadPackage {
                         boolean isChildOfGroup = false;
                         ViewParent pWalker = (row != null) ? row.getParent() : bgView.getParent();
                         while (pWalker != null) {
+                            if (pWalker instanceof View) {
+                                int pid = ((View) pWalker).getId();
+                                if (pid > 0 && ctx != null && ctx.getResources() != null) {
+                                    try {
+                                        String pRes = ctx.getResources().getResourceEntryName(pid);
+                                        if ("notification_children_container".equals(pRes)) {
+                                            isChildOfGroup = true;
+                                            break;
+                                        }
+                                    } catch (Throwable ignored) {}
+                                }
+                            }
                             String pName = pWalker.getClass().getName();
-                            if (pName.contains("NotificationChildrenContainer")) {
+                            if (pName.contains("ChildrenContainer") || pName.contains("children_container")) {
                                 isChildOfGroup = true;
                                 break;
                             }
@@ -1926,7 +1945,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                             try {
                                 Object normalBg = (sBackgroundNormalField != null) ? sBackgroundNormalField.get(row)
                                         : XposedHelpers.getObjectField(row, "mBackgroundNormal");
-                                if (normalBg == null || bgView != normalBg) {
+                                if (normalBg != null && bgView != normalBg) {
                                     cleanupBlur(bgView);
                                     param.setResult(null);
                                     return;
@@ -2379,7 +2398,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                         // Harmonized, uniform frosted glass tone across all notifications and the shelf collage
                         int frostedColor = isDark
                                 ? (isShelf ? 0x68000000 : 0x60000000)
-                                : (isShelf ? 0x88FFFFFF : 0x70FFFFFF);
+                                : (isShelf ? 0x90FFFFFF : 0x85FFFFFF);
                         int baseBorderAlpha = isDark ? 0x28 : 0x38;
 
                         int baseTintAlpha = Color.alpha(frostedColor);
