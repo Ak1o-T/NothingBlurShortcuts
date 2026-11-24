@@ -1,10 +1,10 @@
 # NothingBlurShortcuts 🪟🔒✨
 
-[![Nothing OS](https://img.shields.io/badge/Nothing%20OS-5.0-black?style=for-the-badge&logo=android)](https://nothing.tech)
+[![Nothing OS](https://img.shields.io/badge/Nothing%20OS-3.0%20%7C%205.0-black?style=for-the-badge&logo=android)](https://nothing.tech)
 [![LSPosed](https://img.shields.io/badge/LSPosed-Supported-5C6BC0?style=for-the-badge)](https://github.com/LSPosed/LSPosed)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue?style=for-the-badge)](LICENSE)
 
-An **Xposed / LSPosed** module for Nothing OS that transforms the two lock screen shortcut buttons (Affordances: Flashlight, Camera, Wallet, Controls, etc.) into authentic **frosted glass widgets** with live hardware-accelerated wallpaper blur — matching official Nothing OS lockscreen widgets and [NothingBlurIcons](https://github.com/Ak1o-T/NothingBlurIcons).
+An **Xposed / LSPosed** module for Nothing OS that brings authentic **Frosted Glass Wallpaper Blur** to the lock screen shortcut buttons, lock screen notifications (including group summaries and shelf icon collages), and floating heads-up alerts — matching official Nothing OS widgets 1:1, while preserving a clean, unblurred stock system background for the notification shade.
 
 [English](#english) | [Русский](#русский)
 
@@ -12,44 +12,76 @@ An **Xposed / LSPosed** module for Nothing OS that transforms the two lock scree
 
 # English
 
+## 📸 Screenshots
+
+| Lockscreen (Dark Mode) | Lockscreen (Light Mode) |
+|:---:|:---:|
+| <img src="screenshots/lockscreen_dark.png" width="300" alt="Lockscreen Dark Mode"/> | <img src="screenshots/lockscreen_light.png" width="300" alt="Lockscreen Light Mode"/> |
+
+| Notification Shade (Dark Mode) | Notification Shade (Light Mode) |
+|:---:|:---:|
+| <img src="screenshots/shade_dark.png" width="300" alt="Notification Shade Dark Mode"/> | <img src="screenshots/shade_light.png" width="300" alt="Notification Shade Light Mode"/> |
+
+---
+
 ## 💡 Concept & Architecture
 
-On Nothing OS lockscreen:
+On stock Nothing OS:
 - **Lockscreen Widgets** (Clock, Weather, Media Player, Quick Actions) feature authentic Frosted Glass wallpaper blur with a delicate specular ring and subtle tint.
-- **Lockscreen Shortcut Buttons** (Bottom left & bottom right quick affordances) by default only have a static, flat, semi-opaque circular background without any wallpaper blur.
+- **Lockscreen Shortcut Buttons** (Bottom left & bottom right quick affordances: Flashlight, Camera, Wallet, Controls) by default only have a static, flat, semi-opaque circular background without any wallpaper blur.
+- **Lockscreen Notifications** are rendered with a flat background rather than the signature Nothing OS frosted glass effect.
 
-**Why a KernelSU / RRO Overlay is NOT enough:**
+### Why a KernelSU / RRO Overlay is NOT enough:
 A pure Magisk or KernelSU overlay (Runtime Resource Overlay) can only modify static drawables, colors, or XML vectors. True dynamic wallpaper blur in Android requires:
 1. Real-time access to the lockscreen wallpaper backdrop provider (`FrostedBackdropProvider` / `NTKeyguardFrostedBackdrop`).
-2. Coordinate projection (`updateOffset(targetX, targetY)`) tracking button movement during pull-down animations and shade expansion.
-3. Live shader rendering through Nothing OS's proprietary `FrostedBackdropDrawable`.
+2. Coordinate projection (`updateOffset(targetX, targetY)`) tracking view positions across screen coordinates.
+3. Live shader rendering through Nothing OS's proprietary `FrostedBackdropDrawable` directly on the view canvas.
 
-**How NothingBlurShortcuts Works:**
+### How NothingBlurShortcuts Works:
 - **Target Process:** `com.android.systemui`
-- **Target Views:** `com.android.systemui.statusbar.phone.KeyguardBottomAreaView` -> `@id/start_button` & `@id/end_button` (`com.android.systemui.animation.view.LaunchableImageView`).
-- **Hook Mechanism:** Hooks `LaunchableImageView.onDraw` and `KeyguardBottomAreaView` lifecycle to inject Nothing OS's native `FrostedBackdropDrawable` directly beneath the shortcut icons, dynamically aligned to the wallpaper behind them.
+- **Lockscreen Shortcuts:** Injects `FrostedBackdropDrawable` under `@id/start_button` and `@id/end_button` (`LaunchableImageView`), perfectly matching widget tone, corner curves, and 1px specular contour in both Dark and Light themes.
+- **Lockscreen Notifications & Shelf:** Replaces the notification card background with Nothing OS's native `FrostedBackdropDrawable`, supporting single notifications, grouped notification summaries (e.g. 4PDA), and the bottom shelf icon collage pill (`NotificationShelf`).
+- **Floating Heads-Up Notifications (HUN):** Direct HardwareCanvas frosted glass rendering for 120 FPS motion without SurfaceFlinger hole-punch lag.
+- **Notification Shade Menu (Zero Blur):** When expanding the notification shade menu (either unlocked or from the lockscreen), notifications seamlessly render with 100% stock system backgrounds without blur.
+- **Smooth Bouncer & Easing:** Synchronized with Compose `PredictiveBack` cubic-bezier easing curve (`0.1f, 0.1f, 0.0f, 1.0f`) for smooth fade-out during PIN/pattern entry.
+
+---
 
 ## ✨ Features
+
 - 🪟 **Authentic Frosted Glass Blur:** Leverages Nothing OS's native lockscreen backdrop engine for 100% parity with stock lockscreen widgets.
-- ⚡ **Specular Highlight Edge:** Renders the signature Nothing OS 1px glass edge around each circular button.
-- 🌓 **Dynamic Theme Sync:** Reacts instantaneously to Dark Mode / Light Mode and wallpaper shifts.
-- 🚀 **120 FPS Native Performance:** Zero stutter or frame drops during lockscreen pull-down and unlock animations.
+- 🔘 **Lockscreen Shortcuts Parity:** Renders bottom affordance buttons with identical glass plate tone and subtle 1px border.
+- 📦 **Grouped Notifications & Shelf Support:** Renders single cards, multi-row notification groups, and shelf pill collages.
+- 🚀 **120 FPS Floating Alerts (HUN):** Hardware-accelerated heads-up notifications that smoothly track entrance, exit, and swipe gestures.
+- 🛡️ **Stock Shade Menu Isolation:** Keeps notifications in the pulled-down shade menu 100% stock solid background for maximum legibility.
+- 🌓 **Dynamic Theme Sync:** Instantly adapts to Dark Mode / Light Mode and wallpaper color shifts.
+- 🔒 **Seamless Bouncer Transition:** Fades out gracefully when unlocking or invoking the PIN/pattern bouncer.
+
+---
 
 ## 📱 Compatibility
-- Nothing OS 5.0 (Android 17)
-- Tested on Nothing Phone (3) (`A024`)
+
+- Nothing OS 3.0 / 5.0 (Android 14 / Android 15+)
+- Tested on Nothing Phone (2), Nothing Phone (3) (`A024`), Nothing Phone (2a)
+
+---
 
 ## 🛠️ Installation
-1. Install `NothingBlurShortcuts.apk` on your device.
-2. Open **LSPosed Manager** -> **Modules** -> Enable **NothingBlurShortcuts**.
-3. Ensure the module scope has **System UI** (`com.android.systemui`) checked.
-4. Restart SystemUI:
+
+1. Download or build `NothingBlurShortcuts.apk`.
+2. Install `NothingBlurShortcuts.apk` on your device.
+3. Open **LSPosed Manager** -> **Modules** -> Enable **NothingBlurShortcuts**.
+4. Ensure the module scope has **System UI** (`com.android.systemui`) checked.
+5. Restart SystemUI:
    ```bash
    adb shell su -c killall -9 com.android.systemui
    ```
-   (or reboot your device).
+   (or restart your device).
+
+---
 
 ## 🏗️ Building from Source
+
 ```bash
 ./build.sh
 ```
@@ -59,21 +91,69 @@ Output signed APK: `bin/NothingBlurShortcuts.apk`.
 
 # Русский
 
+## 📸 Скриншоты
+
+| Экран блокировки (Тёмная тема) | Экран блокировки (Светлая тема) |
+|:---:|:---:|
+| <img src="screenshots/lockscreen_dark.png" width="300" alt="Экран блокировки — Тёмная тема"/> | <img src="screenshots/lockscreen_light.png" width="300" alt="Экран блокировки — Светлая тема"/> |
+
+| Меню шторки (Тёмная тема) | Меню шторки (Светлая тема) |
+|:---:|:---:|
+| <img src="screenshots/shade_dark.png" width="300" alt="Меню уведомлений — Тёмная тема"/> | <img src="screenshots/shade_light.png" width="300" alt="Меню уведомлений — Светлая тема"/> |
+
+---
+
 ## 💡 Концепция и архитектура
 
-На экране блокировки Nothing OS:
-- **Виджеты экрана блокировки** (часы, погода, плеер) выполнены в фирменном стиле «матового стекла» (Frosted Glass) с живым аппаратным размытием обоев и тонким контуром.
-- **Нижние ярлыки** (две кнопки в нижних углах: камера, фонарик и т.д.) по умолчанию отображаются с плоским серым кругом без какого-либо размытия.
+В стандартной Nothing OS:
+- **Виджеты экрана блокировки** (часы, погода, плеер, быстрые действия) выполнены в фирменном стиле «матового стекла» (Frosted Glass) с живым аппаратным размытием обоев и тонким контуром.
+- **Нижние ярлыки** (кнопки в нижних углах: камера, фонарик, кошелек и т.д.) по умолчанию отображаются с плоским серым кругом без какого-либо размытия.
+- **Уведомления на экране блокировки** имеют стандартный фон без матового стекла.
 
 ### Почему чистый модуль KernelSU / Overlay не подходит:
-Через RRO (Runtime Resource Overlay) в KernelSU можно подменять только статичные ресурсы (цвета, векторные XML вроде `@drawable/keyguard_bottom_affordance_bg`). Динамическое размытие обоев невозможно реализовать через XML — для этого нужен доступ к системному движку обоев, расчёт экранных координат и отрисовка нативного шейдера в реальном времени.
+Через RRO (Runtime Resource Overlay) в KernelSU можно подменять только статичные ресурсы (цвета, векторные XML). Настоящее динамическое размытие обоев в Android требует:
+1. Прямого доступа к системному поставщику подложки обоев (`FrostedBackdropProvider` / `NTKeyguardFrostedBackdrop`).
+2. Динамической проекции экранных координат (`updateOffset(targetX, targetY)`).
+3. Отрисовки нативного шейдера Nothing OS `FrostedBackdropDrawable` непосредственно на холсте View.
 
 ### Как работает LSPosed-модуль:
 - **Целевой процесс:** `com.android.systemui` (SystemUI).
-- **Элементы кнопок:** в контейнере `KeyguardBottomAreaView` находятся две вьюшки `LaunchableImageView` с ID `@id/start_button` и `@id/end_button`.
-- **Внедрение:** Модуль подключается к нативным классам `FrostedBackdropProvider` и `FrostedBackdropDrawable`, которые уже встроены в SystemUI Nothing OS, перехватывает отрисовку кнопок и рендерит под каждой из них настоящее матовое стекло, повторяющее стиль виджетов Nothing OS.
+- **Нижние кнопки быстрого доступа:** Модуль внедряет `FrostedBackdropDrawable` под `@id/start_button` и `@id/end_button` (`LaunchableImageView`), добиваясь 100% совпадения тона матового стекла и контура с виджетами как в тёмной, так и в светлой теме.
+- **Уведомления экрана блокировки:** Одиночные карточки, групповые уведомления (например, группа 4PDA с несколькими сообщениями) и плашка-коллаж иконок (`NotificationShelf`) отрисовываются с аутентичным Nothing Frosted Glass блюром.
+- **Всплывающие уведомления (Heads-Up):** Размытие рендерится аппаратно прямо на холсте для плавной анимации 120 FPS без лагов SurfaceFlinger.
+- **Меню шторки уведомлений (без блюра):** При раскрытии шторки (как с экрана блокировки, так и на разблокированном устройстве) карточки уведомлений сохраняют 100% стоковый системный фон без размытия, гарантируя максимальную читаемость.
+- **Плавный переход в Bouncer:** Поддержка фирменной кривой интерполяции Compose `PredictiveBack` (`0.1f, 0.1f, 0.0f, 1.0f`) для бесшовного затухания размытия при вводе пароля/PIN-кода.
+
+---
+
+## ✨ Возможности
+
+- 🪟 **Настоящий Nothing Frosted Glass Blur:** Использование нативного движка обоев Nothing OS для идеальной гармонии с виджетами.
+- 🔘 **Стилизация нижних кнопок:** Матовое стекло и аккуратный контур 1px для кнопок быстрого доступа.
+- 📦 **Поддержка групп и коллажа иконок:** Блюр аккуратно обрезается по форме карточек и пилюли полочки `NotificationShelf`.
+- 🚀 **120 FPS всплывающие уведомления (HUN):** Плавное отслеживание появления, скрытия и свайпов.
+- 🛡️ **Изоляция шторки уведомлений:** Внутри раскрытого меню уведомлений отображается чистый стоковый фон без размытия.
+- 🌓 **Автоматическая смена тем:** Моментальная синхронизация с тёмной и светлой темами.
+- 🔒 **Гладкий переход к разблокировке:** Красивое угасание при переходе к окну ввода PIN-кода.
+
+---
+
+## 🛠️ Установка
+
+1. Скачайте или соберите `NothingBlurShortcuts.apk`.
+2. Установите APK на устройство.
+3. Откройте **LSPosed Manager** -> **Модули** -> Включите **NothingBlurShortcuts**.
+4. Убедитесь, что в области действия выбран **System UI** (`com.android.systemui`).
+5. Перезапустите SystemUI:
+   ```bash
+   adb shell su -c killall -9 com.android.systemui
+   ```
+   (или перезагрузите телефон).
+
+---
 
 ## 🏗️ Сборка
+
 ```bash
 ./build.sh
 ```
