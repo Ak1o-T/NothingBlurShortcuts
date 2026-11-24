@@ -163,6 +163,7 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static Field sNormalColorField = null;
     private static Field sOnKeyguardField = null;
     private static Field sBackgroundField = null;
+    private static Field sCornerRadiiField = null;
 
     private static Method sIsShowNoBackgroundMethod = null;
     private static Method sGetActualHeightMethod = null;
@@ -1455,6 +1456,7 @@ public class XposedInit implements IXposedHookLoadPackage {
             try { sNormalColorField = notifBgClass.getDeclaredField("mNormalColor"); sNormalColorField.setAccessible(true); } catch (Throwable ignored) {}
             try { sOnKeyguardField = notifBgClass.getDeclaredField("mOnKeyguard"); sOnKeyguardField.setAccessible(true); } catch (Throwable ignored) {}
             try { sBackgroundField = notifBgClass.getDeclaredField("mBackground"); sBackgroundField.setAccessible(true); } catch (Throwable ignored) {}
+            try { sCornerRadiiField = notifBgClass.getDeclaredField("mCornerRadii"); sCornerRadiiField.setAccessible(true); } catch (Throwable ignored) {}
             try { sGetViewRootImplMethod = View.class.getMethod("getViewRootImpl"); sGetViewRootImplMethod.setAccessible(true); } catch (Throwable ignored) {}
 
             try {
@@ -1876,6 +1878,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                             || (row != null && row.getClass().getName().contains("Shelf"))
                             || (shelfCls != null && row != null && shelfCls.isAssignableFrom(row.getClass()));
 
+                    boolean isChildOfGroup = false;
                     // Only mBackgroundNormal should ever draw notification card backgrounds.
                     // mBackgroundDimmed must NEVER draw on parent/single rows because it causes stacked darker layers.
                     // When a group is collapsed, child rows inside NotificationChildrenContainer must NEVER draw.
@@ -1889,7 +1892,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                             } catch (Throwable ignored) {}
                         }
 
-                        boolean isChildOfGroup = false;
                         ViewParent pWalker = (row != null) ? row.getParent() : bgView.getParent();
                         while (pWalker != null) {
                             if (pWalker instanceof View) {
@@ -2326,25 +2328,44 @@ public class XposedInit implements IXposedHookLoadPackage {
                         return;
                     }
 
-                    // System corner radius detection via Roundable interface:
+                    // System corner radius detection:
                     float densityF = ctx.getResources().getDisplayMetrics().density;
-                    float defaultRadius = 18.0f * densityF;
-                    float topRadius = defaultRadius;
-                    float bottomRadius = defaultRadius;
+                    float topRadius = 0f;
+                    float bottomRadius = 0f;
+                    boolean radiusDetermined = false;
 
                     if (isShelf) {
                         topRadius = (drawBottom - drawTop) / 2.0f;
                         bottomRadius = topRadius;
-                    } else if (row != null) {
-                        if (sGetTopCornerRadiusMethod != null && sGetBottomCornerRadiusMethod != null) {
+                        radiusDetermined = true;
+                    } else {
+                        // 1. Try to read system calculated mCornerRadii from NotificationBackgroundView
+                        if (sCornerRadiiField != null) {
+                            try {
+                                float[] bgRadii = (float[]) sCornerRadiiField.get(bgView);
+                                if (bgRadii != null && bgRadii.length >= 8) {
+                                    topRadius = bgRadii[0];
+                                    bottomRadius = bgRadii[4];
+                                    radiusDetermined = true;
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+                        // 2. Try row.getTopCornerRadius() / row.getBottomCornerRadius()
+                        if (!radiusDetermined && row != null && sGetTopCornerRadiusMethod != null && sGetBottomCornerRadiusMethod != null) {
                             try {
                                 Float tr = (Float) sGetTopCornerRadiusMethod.invoke(row);
                                 Float br = (Float) sGetBottomCornerRadiusMethod.invoke(row);
-                                if (tr != null && br != null && (tr > 0f || br > 0f)) {
+                                if (tr != null && br != null) {
                                     topRadius = tr;
                                     bottomRadius = br;
+                                    radiusDetermined = true;
                                 }
                             } catch (Throwable ignored) {}
+                        }
+                        // 3. For single rows, if radius was 0 (e.g. uninitialized before first layout), use standard system radius
+                        if (!radiusDetermined || (!isChildOfGroup && topRadius <= 0f && bottomRadius <= 0f)) {
+                            topRadius = 18.0f * densityF;
+                            bottomRadius = topRadius;
                         }
                     }
 
