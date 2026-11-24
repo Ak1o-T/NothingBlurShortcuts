@@ -2749,6 +2749,16 @@ public class XposedInit implements IXposedHookLoadPackage {
             boolean isDark, float densityF, float combinedAlpha, float blurWeight) {
         bgView.setTag(TAG_KEY_BLUR_ACTIVE, Boolean.TRUE);
 
+        // Ensure any HUN window blur is deactivated on lockscreen
+        Object existingBbd = bgView.getTag(TAG_KEY_BLUR_DRAWABLE);
+        if (existingBbd instanceof Drawable) {
+            try {
+                Drawable d = (Drawable) existingBbd;
+                d.setAlpha(0);
+                d.setVisible(false, false);
+            } catch (Throwable ignored) {}
+        }
+
         Context ctx = bgView.getContext();
         if (backdropProvider == null && providerClass != null) {
             try {
@@ -2888,7 +2898,8 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     /**
      * Mode 3: Floating Heads-Up Notification Card (Version 3 - Heads-Up Floating Alert)
-     * Authentic Nothing OS FrostedBackdropDrawable (exact widget frosted glass blur & tint)
+     * SurfaceFlinger BackgroundBlurDrawable (blurs live running apps / content underneath)
+     * Combined with authentic Nothing OS translucent Lucent frosted tint & specular border.
      * Rendered directly onto the view canvas for hardware-accelerated 120Hz lag-free animation.
      */
     private static void renderHeadsUpCard(
@@ -2911,76 +2922,79 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
 
         Context ctx = bgView.getContext();
-        if (backdropProvider == null && providerClass != null) {
-            try {
-                Object companion = XposedHelpers.getStaticObjectField(providerClass, "Companion");
-                backdropProvider = XposedHelpers.callMethod(companion, "getInstance");
-            } catch (Throwable ignored) {}
-        }
+        ensureBlurReflection(ctx != null ? ctx.getClassLoader() : null);
 
-        // Get or create FrostedBackdropDrawable for this HUN card
-        Drawable frosted = (Drawable) bgView.getTag(TAG_KEY_FROSTED_DRAWABLE);
-        if (frosted == null && backdropProvider != null && drawableClass != null && ctx != null) {
-            try {
-                frosted = (Drawable) XposedHelpers.newInstance(drawableClass, ctx, backdropProvider);
-                if (frosted != null) {
-                    frosted.setCallback(null);
-                    if (setAnimateEntranceMethod != null) {
-                        try { setAnimateEntranceMethod.invoke(frosted, false); } catch (Throwable ignored) {}
-                    }
-                    if (completeTransitionNowMethod != null) {
-                        try { completeTransitionNowMethod.invoke(frosted); } catch (Throwable ignored) {}
-                    }
-                    if (onThemeChangedMethod != null) {
-                        try { onThemeChangedMethod.invoke(frosted); } catch (Throwable ignored) {}
-                    }
-                    bgView.setTag(TAG_KEY_FROSTED_DRAWABLE, frosted);
-                }
-            } catch (Throwable t) {
-                Log.e(TAG, "Failed creating FrostedBackdropDrawable for HUN: " + t);
+        // 1. Get or create BackgroundBlurDrawable for live window background blur (SurfaceFlinger)
+        // This blurs whatever is actively on screen behind the notification (apps, games, YouTube, etc.)
+        Drawable blurDrawable = (Drawable) bgView.getTag(TAG_KEY_BLUR_DRAWABLE);
+        if (blurDrawable == null && sCreateBackgroundBlurDrawableMethod != null) {
+            Object vri = null;
+            if (sGetViewRootImplMethod != null) {
+                try { vri = sGetViewRootImplMethod.invoke(bgView); } catch (Throwable ignored) {}
             }
-        }
-
-        // 1. Render authentic Nothing OS frosted glass card
-        if (frosted != null) {
-            if (ctx != null) {
-                int currentUiMode = ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
-                Integer lastUi = (Integer) bgView.getTag(TAG_KEY_LAST_UI_MODE);
-                if (lastUi == null || lastUi != currentUiMode) {
-                    if (onThemeChangedMethod != null) {
-                        try { onThemeChangedMethod.invoke(frosted); } catch (Throwable ignored) {}
+            if (vri == null && bgView.getRootView() != null && sGetViewRootImplMethod != null) {
+                try { vri = sGetViewRootImplMethod.invoke(bgView.getRootView()); } catch (Throwable ignored) {}
+            }
+            if (vri == null && row != null && sGetViewRootImplMethod != null) {
+                try { vri = sGetViewRootImplMethod.invoke(row); } catch (Throwable ignored) {}
+            }
+            if (vri != null) {
+                try {
+                    Object created = sCreateBackgroundBlurDrawableMethod.invoke(vri);
+                    if (created instanceof Drawable) {
+                        blurDrawable = (Drawable) created;
+                        bgView.setTag(TAG_KEY_BLUR_DRAWABLE, blurDrawable);
                     }
-                    bgView.setTag(TAG_KEY_LAST_UI_MODE, currentUiMode);
+                } catch (Throwable t) {
+                    Log.e(TAG, "Failed creating BackgroundBlurDrawable for HUN: " + t);
                 }
             }
+        }
 
-            if (setClipRadiusMethod != null) {
-                try { setClipRadiusMethod.invoke(frosted, topRadius); } catch (Throwable ignored) {}
+        // 2. Draw live window background blur
+        int alpha255 = Math.max(0, Math.min(255, Math.round(255 * combinedAlpha)));
+        if (blurDrawable != null) {
+            int blurRadius = Math.round(26.0f * densityF);
+            if (sSetBlurRadiusMethod != null) {
+                try { sSetBlurRadiusMethod.invoke(blurDrawable, blurRadius); } catch (Throwable ignored) {}
+            }
+            if (sSetCornerRadiusMethod != null) {
+                try {
+                    sSetCornerRadiusMethod.invoke(blurDrawable, topRadius, topRadius, bottomRadius, bottomRadius);
+                } catch (Throwable ignored) {
+                    if (sSetCornerRadiusSingleMethod != null) {
+                        try { sSetCornerRadiusSingleMethod.invoke(blurDrawable, topRadius); } catch (Throwable ignored2) {}
+                    }
+                }
+            } else if (sSetCornerRadiusSingleMethod != null) {
+                try { sSetCornerRadiusSingleMethod.invoke(blurDrawable, topRadius); } catch (Throwable ignored) {}
             }
 
-            int[] loc = new int[2];
-            bgView.getLocationOnScreen(loc);
-            float screenX = loc[0] + drawLeft;
-            float screenY = loc[1] + drawTop;
+            blurDrawable.setBounds(drawLeft, drawTop, drawRight, drawBottom);
+            blurDrawable.setAlpha(alpha255);
+            blurDrawable.setVisible(alpha255 > 0, false);
+            blurDrawable.draw(canvas);
+        }
 
-            if (updateOffsetMethod != null) {
-                try { updateOffsetMethod.invoke(frosted, screenX, screenY); } catch (Throwable ignored) {}
-            }
-
-            frosted.setBounds(drawLeft, drawTop, drawRight, drawBottom);
-            int alpha255 = Math.max(0, Math.min(255, Math.round(255 * combinedAlpha)));
-            frosted.setAlpha(alpha255);
-            frosted.draw(canvas);
-        } else {
-            // Fallback to widget frosted plate if FrostedBackdropDrawable is not yet ready
-            int frostedColor = getFrostedBackdropColor(ctx, isDark);
-            int baseTintAlpha = Color.alpha(frostedColor);
-            int animTintAlpha = Math.round(baseTintAlpha * combinedAlpha);
+        // 3. Render authentic Nothing OS translucent frosted tint over the blur
+        int frostedColor = getFrostedBackdropColor(ctx, isDark);
+        int baseTintAlpha = Color.alpha(frostedColor);
+        int animTintAlpha = Math.round(baseTintAlpha * combinedAlpha);
+        if (animTintAlpha > 0) {
             glassTintPaint.setColor((frostedColor & 0x00FFFFFF) | (animTintAlpha << 24));
             canvas.drawPath(clipPath, glassTintPaint);
         }
 
-        // 2. Ripple effect for touch feedback on floating HUN cards
+        // 4. Crisp specular glass border highlight (Nothing OS design signature)
+        int borderColor = isDark ? 0x22FFFFFF : 0x30FFFFFF;
+        int borderAlpha = Math.round(Color.alpha(borderColor) * combinedAlpha);
+        if (borderAlpha > 0) {
+            glassBorderPaint.setColor((borderColor & 0x00FFFFFF) | (borderAlpha << 24));
+            glassBorderPaint.setStrokeWidth(Math.max(1.5f, 1.0f * densityF));
+            canvas.drawPath(clipPath, glassBorderPaint);
+        }
+
+        // 5. Ripple effect for touch feedback on floating HUN cards
         Drawable ripple = (Drawable) bgView.getTag(TAG_KEY_RIPPLE);
         if (ripple == null) {
             try {
@@ -3555,11 +3569,17 @@ public class XposedInit implements IXposedHookLoadPackage {
             }
         }
         try {
-            Object bd = (sBackgroundBlurDrawableField != null) ? sBackgroundBlurDrawableField.get(bgView)
-                    : XposedHelpers.getObjectField(bgView, "mBackgroundBlurDrawable");
+            Object bd = bgView.getTag(TAG_KEY_BLUR_DRAWABLE);
+            if (bd == null && sBackgroundBlurDrawableField != null) {
+                try { bd = sBackgroundBlurDrawableField.get(bgView); } catch (Throwable ignored) {}
+            }
+            if (bd == null) {
+                try { bd = XposedHelpers.getObjectField(bgView, "mBackgroundBlurDrawable"); } catch (Throwable ignored) {}
+            }
             if (bd instanceof Drawable) {
                 Drawable d = (Drawable) bd;
                 d.setAlpha(0);
+                d.setVisible(false, false);
             }
         } catch (Throwable ignored) {}
         bgView.setTag(TAG_KEY_BLUR_ACTIVE, Boolean.FALSE);
