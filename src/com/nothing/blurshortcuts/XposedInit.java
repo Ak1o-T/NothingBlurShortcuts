@@ -539,7 +539,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                                         }
                                     }
 
-                                    // 1. Render authentic blurred wallpaper backdrop
+                                    // 1. Render authentic blurred wallpaper backdrop (exact same drawable used by lockscreen widgets)
                                     if (frosted != null) {
                                         if (setClipRadiusMethod != null) {
                                             setClipRadiusMethod.invoke(frosted, radius);
@@ -549,18 +549,12 @@ public class XposedInit implements IXposedHookLoadPackage {
                                         }
                                         frosted.setBounds(0, 0, (int) width, (int) height);
                                         frosted.draw(nativeCanvas);
+                                    } else {
+                                        // Fallback if FrostedBackdropDrawable is not available
+                                        int widgetColor = getFrostedBackdropColor(ctx, isDark);
+                                        glassTintPaint.setColor(widgetColor);
+                                        nativeCanvas.drawCircle(cx, cy, radius, glassTintPaint);
                                     }
-
-                                    // 2. Render authentic widget-style frosted glass plate matching Nothing OS widgets
-                                    int widgetColor = getFrostedBackdropColor(ctx, isDark);
-                                    glassTintPaint.setColor(widgetColor);
-
-                                    int borderAlpha = isDark ? 0x20 : 0x30;
-                                    glassBorderPaint.setColor((0x00FFFFFF) | (borderAlpha << 24));
-                                    glassBorderPaint.setStrokeWidth(1.0f);
-
-                                    nativeCanvas.drawCircle(cx, cy, radius, glassTintPaint);
-                                    nativeCanvas.drawCircle(cx, cy, radius - 0.5f, glassBorderPaint);
 
                                 } catch (Throwable t) {
                                     Log.e(TAG, "Error in drawBlurBehind lambda: " + t, t);
