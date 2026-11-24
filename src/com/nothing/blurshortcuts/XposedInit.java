@@ -112,8 +112,8 @@ public class XposedInit implements IXposedHookLoadPackage {
             } else if (alpha > 0.05f && sScreenAwake) {
                 if (sNotificationBlursCleared) {
                     sNotificationBlursCleared = false;
+                    invalidateNotificationStack();
                 }
-                invalidateNotificationStack();
             }
         }
     }
@@ -190,6 +190,8 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static Method sHasCustomOutlineMethod = null;
     private static Method sGetAppearAnimationFractionMethod = null;
     private static Method sIsDrawingAppearAnimationMethod = null;
+    private static Method sIsChildInGroupMethod = null;
+    private static Method sIsGroupExpandedMethod = null;
     private static Field sShelfActualWidthField = null;
 
     private static Object sLucentColorUtilsInstance = null;
@@ -548,12 +550,12 @@ public class XposedInit implements IXposedHookLoadPackage {
                                     // 2. Render Widget-style frosted glass plate overlay dynamically adapted to Dark/Light theme
                                     if (isDark) {
                                         // Dark theme: translucent smoked glass overlay + subtle specular edge rim
-                                        glassTintPaint.setColor(0x44000000);
+                                        glassTintPaint.setColor(0x36000000);
                                         glassBorderPaint.setColor(0x28FFFFFF);
                                     } else {
                                         // Light theme: translucent milky white glass overlay + specular edge rim
-                                        glassTintPaint.setColor(0x38FFFFFF);
-                                        glassBorderPaint.setColor(0x45FFFFFF);
+                                        glassTintPaint.setColor(0x32FFFFFF);
+                                        glassBorderPaint.setColor(0x38FFFFFF);
                                     }
 
                                     nativeCanvas.drawCircle(cx, cy, radius, glassTintPaint);
@@ -909,23 +911,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                             } catch (Throwable ignored) {}
                         }
                     });
-                    try {
-                        XposedBridge.hookAllMethods(targetCls, "notifyAndSetSystemUiStateChanged", new XC_MethodHook() {
-                            @Override
-                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                                sSysUiState = param.thisObject;
-                                if (param.args.length >= 2 && param.args[0] instanceof Long && param.args[1] instanceof Long) {
-                                    long oldFlags = (Long) param.args[0];
-                                    long newFlags = (Long) param.args[1];
-                                    if ((oldFlags & 8L) != (newFlags & 8L)) {
-                                        boolean bouncer = (newFlags & 8L) != 0;
-                                        Log.e(TAG, "notifyAndSetSystemUiStateChanged bouncer=" + bouncer);
-                                        onBouncerShowingChanged(bouncer, "notifyAndSetSystemUiStateChanged");
-                                    }
-                                }
-                            }
-                        });
-                    } catch (Throwable ignored) {}
                 } catch (Throwable ignored) {}
             }
 
@@ -1448,6 +1433,8 @@ public class XposedInit implements IXposedHookLoadPackage {
             try { sGetBottomCornerRadiusMethod = notifRowClass.getMethod("getBottomCornerRadius"); sGetBottomCornerRadiusMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sGetActualHeightMethod = notifRowClass.getMethod("getActualHeight"); sGetActualHeightMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sIsShowNoBackgroundMethod = notifRowClass.getMethod("isShowNoBackground"); sIsShowNoBackgroundMethod.setAccessible(true); } catch (Throwable ignored) {}
+            try { sIsChildInGroupMethod = notifRowClass.getMethod("isChildInGroup"); sIsChildInGroupMethod.setAccessible(true); } catch (Throwable ignored) {}
+            try { sIsGroupExpandedMethod = notifRowClass.getMethod("isGroupExpanded"); sIsGroupExpandedMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sGetNormalColorMethod = notifRowClass.getMethod("getNormalColor"); sGetNormalColorMethod.setAccessible(true); } catch (Throwable ignored) {}
             try { sShowNoBackgroundField = notifRowClass.getDeclaredField("mShowNoBackground"); sShowNoBackgroundField.setAccessible(true); } catch (Throwable ignored) {}
             try { sBackgroundNormalField = notifRowClass.getDeclaredField("mBackgroundNormal"); sBackgroundNormalField.setAccessible(true); } catch (Throwable ignored) {}
@@ -1901,6 +1888,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                             Object normalBg = (sBackgroundNormalField != null) ? sBackgroundNormalField.get(row)
                                     : XposedHelpers.getObjectField(row, "mBackgroundNormal");
                             if (normalBg != null && bgView != normalBg) {
+                                cleanupBlur(bgView);
                                 param.setResult(null);
                                 return;
                             }
@@ -2141,11 +2129,24 @@ public class XposedInit implements IXposedHookLoadPackage {
                     boolean isDark = (uiMode == Configuration.UI_MODE_NIGHT_YES);
 
                     boolean showNoBg = false;
-                    if (row != null) {
+                    if (row != null && !isShelf) {
                         if (sIsShowNoBackgroundMethod != null) {
                             try { showNoBg = (Boolean) sIsShowNoBackgroundMethod.invoke(row); } catch (Throwable ignored) {}
                         } else if (sShowNoBackgroundField != null) {
                             try { showNoBg = sShowNoBackgroundField.getBoolean(row); } catch (Throwable ignored) {}
+                        }
+                        if (!showNoBg) {
+                            try {
+                                boolean isChild = (sIsChildInGroupMethod != null) ? (Boolean) sIsChildInGroupMethod.invoke(row)
+                                        : (Boolean) XposedHelpers.callMethod(row, "isChildInGroup");
+                                if (isChild) {
+                                    boolean groupExpanded = (sIsGroupExpandedMethod != null) ? (Boolean) sIsGroupExpandedMethod.invoke(row)
+                                            : (Boolean) XposedHelpers.callMethod(row, "isGroupExpanded");
+                                    if (!groupExpanded) {
+                                        showNoBg = true;
+                                    }
+                                }
+                            } catch (Throwable ignored) {}
                         }
                     }
                     if (showNoBg && !isShelf) {
@@ -2338,15 +2339,14 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
 
                         // 2. Frosted Glass Tint & Specular Border Highlight (Dynamic Dark & Light Theme)
-                        int frostedColor = getFrostedBackdropColor(ctx, isDark);
-                        if (isShelf) {
-                            frostedColor = isDark ? 0x38000000 : 0x40FFFFFF;
-                        }
+                        // Harmonized, uniform frosted glass tone across all notifications and the shelf collage
+                        int frostedColor = isDark ? 0x36000000 : 0x32FFFFFF;
+                        int baseBorderAlpha = isDark ? 0x28 : 0x38;
+
                         int baseTintAlpha = Color.alpha(frostedColor);
                         int animTintAlpha = Math.round(baseTintAlpha * combinedAlpha);
                         glassTintPaint.setColor((frostedColor & 0x00FFFFFF) | (animTintAlpha << 24));
 
-                        int baseBorderAlpha = isDark ? (isShelf ? 0x35 : 0x28) : 0x45;
                         int animBorderAlpha = Math.round(baseBorderAlpha * combinedAlpha);
                         glassBorderPaint.setColor((0x00FFFFFF) | (animBorderAlpha << 24));
                         glassBorderPaint.setStrokeWidth(1.0f * densityF);
@@ -2878,12 +2878,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                 sNsslView.setAlpha(1.0f);
             }
             invalidateNotificationStack();
-            if (h != null) {
-                h.removeCallbacks(sWakeInvalidateRunnable);
-                h.postDelayed(sWakeInvalidateRunnable, 50);
-                h.postDelayed(sWakeInvalidateRunnable, 150);
-                h.postDelayed(sWakeInvalidateRunnable, 300);
-            }
         }
     }
 
