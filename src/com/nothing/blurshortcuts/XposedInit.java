@@ -1286,7 +1286,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                         sNsslView = (View) param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
                             float alpha = (Float) param.args[0];
-                            if (alpha < 0.05f && sScreenAwake) {
+                            if (alpha < 0.05f && sScreenAwake && sStatusBarState == 1) {
                                 clearAllNotificationBlurs();
                             } else if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake) {
                                 invalidateNotificationStack();
@@ -1300,7 +1300,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                         sNsslView = (View) param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
                             float alpha = (Float) param.args[0];
-                            if (alpha < 0.05f && sScreenAwake) {
+                            if (alpha < 0.05f && sScreenAwake && sStatusBarState == 1) {
                                 clearAllNotificationBlurs();
                             } else if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake) {
                                 invalidateNotificationStack();
@@ -1314,7 +1314,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                         sNsslView = (View) param.thisObject;
                         if (param.args.length > 0 && param.args[0] instanceof Integer) {
                             int vis = (Integer) param.args[0];
-                            if (vis != View.VISIBLE && sScreenAwake) {
+                            if (vis != View.VISIBLE && sScreenAwake && sStatusBarState == 1) {
                                 clearAllNotificationBlurs();
                             } else if (vis == View.VISIBLE && sStatusBarState == 1 && sScreenAwake) {
                                 invalidateNotificationStack();
@@ -1331,7 +1331,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         if (param.args.length > 0 && param.args[0] instanceof Float) {
                             float alpha = (Float) param.args[0];
-                            if (alpha < 0.05f && sScreenAwake) {
+                            if (alpha < 0.05f && sScreenAwake && sStatusBarState == 1) {
                                 clearAllNotificationBlurs();
                             } else if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake) {
                                 invalidateNotificationStack();
@@ -1344,7 +1344,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         if (param.args.length > 0 && param.args[0] instanceof Integer) {
                             int vis = (Integer) param.args[0];
-                            if (vis != View.VISIBLE && sScreenAwake) {
+                            if (vis != View.VISIBLE && sScreenAwake && sStatusBarState == 1) {
                                 clearAllNotificationBlurs();
                             } else if (vis == View.VISIBLE && sStatusBarState == 1 && sScreenAwake) {
                                 invalidateNotificationStack();
@@ -1558,16 +1558,16 @@ public class XposedInit implements IXposedHookLoadPackage {
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                     if (param.thisObject instanceof View) {
                         View row = (View) param.thisObject;
-                        boolean isPinned = false;
-                        if (sIsPinnedMethod != null) {
-                            try { isPinned = (Boolean) sIsPinnedMethod.invoke(row); } catch (Throwable ignored) {}
+                        boolean hun = isRowHun(row);
+                        row.setTag(TAG_KEY_IS_HUN, hun ? Boolean.TRUE : Boolean.FALSE);
+                        if (sBackgroundNormalField != null) {
+                            try {
+                                View bgNormal = (View) sBackgroundNormalField.get(row);
+                                if (bgNormal != null) {
+                                    bgNormal.invalidate();
+                                }
+                            } catch (Throwable ignored) {}
                         }
-                        boolean animatingAway = false;
-                        if (sIsHeadsUpAnimatingAwayMethod != null) {
-                            try { animatingAway = (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(row); } catch (Throwable ignored) {}
-                        }
-                        boolean isHun = isPinned || animatingAway;
-                        row.setTag(TAG_KEY_IS_HUN, isHun ? Boolean.TRUE : Boolean.FALSE);
                     }
                 }
             };
@@ -1585,42 +1585,11 @@ public class XposedInit implements IXposedHookLoadPackage {
                 });
             } catch (Throwable ignored) {}
 
-            XC_MethodHook headsUpAnimatingAwayHook = new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    View row = (View) param.thisObject;
-                    if (row != null) {
-                        boolean animatingAway = false;
-                        if (param.args.length > 0 && param.args[0] instanceof Boolean) {
-                            animatingAway = (Boolean) param.args[0];
-                        }
-                        row.setTag(TAG_KEY_IS_HUN, animatingAway ? Boolean.TRUE : Boolean.FALSE);
-                        if (!animatingAway) {
-                            if (sBackgroundNormalField != null) {
-                                try {
-                                    View bgNormal = (View) sBackgroundNormalField.get(row);
-                                    if (bgNormal != null) cleanupBlur(bgNormal);
-                                } catch (Throwable ignored) {}
-                            }
-                        } else {
-                            row.invalidate();
-                            if (sBackgroundNormalField != null) {
-                                try {
-                                    View bgNormal = (View) sBackgroundNormalField.get(row);
-                                    if (bgNormal != null) bgNormal.invalidate();
-                                } catch (Throwable ignored) {}
-                            }
-                        }
-                    }
-                }
-            };
-            try { XposedBridge.hookAllMethods(notifRowClass, "setHeadsUpAnimatingAway", headsUpAnimatingAwayHook); } catch (Throwable ignored) {}
-
             XC_MethodHook hunMotionHook = new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                     View row = (View) param.thisObject;
-                    if (row != null && row.getTag(TAG_KEY_IS_HUN) == Boolean.TRUE) {
+                    if (row != null && isRowHun(row)) {
                         if (sBackgroundNormalField != null) {
                             try {
                                 View bgNormal = (View) sBackgroundNormalField.get(row);
@@ -1631,6 +1600,11 @@ public class XposedInit implements IXposedHookLoadPackage {
                 }
             };
             try { XposedBridge.hookAllMethods(notifRowClass, "setTranslation", hunMotionHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "setTranslationY", hunMotionHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "setTranslationX", hunMotionHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "setAlpha", hunMotionHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "setScaleX", hunMotionHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "setScaleY", hunMotionHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifRowClass, "setClipTopAmount", hunMotionHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifRowClass, "setClipBottomAmount", hunMotionHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifRowClass, "applyLaunchAnimationParams", hunMotionHook); } catch (Throwable ignored) {}
@@ -1655,7 +1629,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         if (param.args.length > 0 && param.args[0] instanceof View) {
                             View row = (View) param.args[0];
-                            if (row.getTag(TAG_KEY_IS_HUN) == Boolean.TRUE && sBackgroundNormalField != null) {
+                            if (isRowHun(row) && sBackgroundNormalField != null) {
                                 try {
                                     View bgNormal = (View) sBackgroundNormalField.get(row);
                                     if (bgNormal != null) bgNormal.invalidate();
@@ -1698,7 +1672,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         if (param.args.length > 1 && param.args[0] instanceof View && param.args[1] != null) {
                             final View targetView = (View) param.args[0];
-                            if (targetView.getTag(TAG_KEY_IS_HUN) == Boolean.TRUE) {
+                            if (isRowHun(targetView)) {
                                 int tag = (Integer) getAnimTagMethod.invoke(param.args[1]);
                                 Object anim = targetView.getTag(tag);
                                 if (anim instanceof ValueAnimator) {
@@ -2039,22 +2013,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                         shadeProgress = Math.max(0f, Math.min(1f, Math.max(sLsToShadeProgress, sFractionToShade)));
                     }
 
-                    boolean isHun = false;
+                    boolean isHun = !isShelf && isRowHun(row);
                     boolean isColorized = false;
                     if (!isShelf && row != null) {
-                        Object hunTag = row.getTag(TAG_KEY_IS_HUN);
-                        if (hunTag instanceof Boolean) {
-                            isHun = (Boolean) hunTag;
-                        } else {
-                            if (sIsPinnedMethod != null) {
-                                try { isHun = (Boolean) sIsPinnedMethod.invoke(row); } catch (Throwable ignored) {}
-                            }
-                            if (!isHun && sIsHeadsUpAnimatingAwayMethod != null) {
-                                try { isHun = (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(row); } catch (Throwable ignored) {}
-                            }
-                            row.setTag(TAG_KEY_IS_HUN, isHun ? Boolean.TRUE : Boolean.FALSE);
-                        }
-
                         Object colTag = row.getTag(TAG_KEY_IS_COLORIZED);
                         if (colTag instanceof Boolean) {
                             isColorized = (Boolean) colTag;
@@ -2079,130 +2040,17 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
                     float bgAlpha = bgView.getAlpha();
 
-                    float keyguardFade = (sStatusBarState == 1) ? Math.min(stackAlpha, sKeyguardAlpha) : stackAlpha;
-                    float effectiveAlpha = Math.max(0f, Math.min(1f, rowAlpha * bgAlpha * keyguardFade));
-
-                    float motionFraction = 1.0f;
-                    if (isHun && row != null) {
-                        synchronized (sHunPreDrawListeners) {
-                            if (!sHunPreDrawListeners.containsKey(bgView)) {
-                                final View rowView = row;
-                                final View bgV = bgView;
-                                final ViewTreeObserver.OnPreDrawListener listener = new ViewTreeObserver.OnPreDrawListener() {
-                                    private float lastY = Float.NaN;
-                                    private float lastX = Float.NaN;
-                                    private float lastAlpha = Float.NaN;
-                                    private float lastScaleX = Float.NaN;
-                                    private float lastScaleY = Float.NaN;
-                                    private int lastH = -1;
-                                    private int lastClipTop = -1;
-                                    private int lastClipBottom = -1;
-
-                                    @Override
-                                    public boolean onPreDraw() {
-                                        if (!bgV.isAttachedToWindow() || rowView == null) {
-                                            try {
-                                                ViewTreeObserver vto = bgV.getViewTreeObserver();
-                                                if (vto != null && vto.isAlive()) {
-                                                    vto.removeOnPreDrawListener(this);
-                                                }
-                                            } catch (Throwable ignored) {}
-                                            synchronized (sHunPreDrawListeners) {
-                                                sHunPreDrawListeners.remove(bgV);
-                                            }
-                                            return true;
-                                        }
-
-                                        float y = rowView.getTranslationY();
-                                        if (y == 0f) {
-                                            try {
-                                                Object t = XposedHelpers.callMethod(rowView, "getTranslation");
-                                                if (t instanceof Float) y = (Float) t;
-                                            } catch (Throwable ignored) {}
-                                        }
-                                        float x = rowView.getTranslationX();
-                                        float a = rowView.getAlpha();
-                                        float sx = rowView.getScaleX();
-                                        float sy = rowView.getScaleY();
-
-                                        int h = 0;
-                                        if (sGetActualHeightMethod != null) {
-                                            try { h = (Integer) sGetActualHeightMethod.invoke(rowView); } catch (Throwable ignored) {}
-                                        } else {
-                                            try { h = (Integer) XposedHelpers.callMethod(rowView, "getActualHeight"); } catch (Throwable ignored) {}
-                                        }
-                                        if (h <= 0 && sActualHeightField != null) {
-                                            try { h = sActualHeightField.getInt(bgV); } catch (Throwable ignored) {}
-                                        }
-
-                                        int clipT = 0;
-                                        if (sClipTopAmountField != null) {
-                                            try { clipT = sClipTopAmountField.getInt(bgV); } catch (Throwable ignored) {}
-                                        }
-                                        int clipB = 0;
-                                        if (sClipBottomAmountField != null) {
-                                            try { clipB = sClipBottomAmountField.getInt(bgV); } catch (Throwable ignored) {}
-                                        }
-
-                                        boolean changed = (!Float.isNaN(lastY)) && (
-                                                y != lastY || x != lastX || a != lastAlpha || sx != lastScaleX || sy != lastScaleY
-                                                || h != lastH || clipT != lastClipTop || clipB != lastClipBottom);
-
-                                        lastY = y;
-                                        lastX = x;
-                                        lastAlpha = a;
-                                        lastScaleX = sx;
-                                        lastScaleY = sy;
-                                        lastH = h;
-                                        lastClipTop = clipT;
-                                        lastClipBottom = clipB;
-
-                                        if (changed) {
-                                            bgV.invalidate();
-                                        }
-                                        return true;
-                                    }
-                                };
-                                ViewTreeObserver vto = bgView.getViewTreeObserver();
-                                if (vto != null && vto.isAlive()) {
-                                    vto.addOnPreDrawListener(listener);
-                                    sHunPreDrawListeners.put(bgView, listener);
-                                }
-                            }
-                        }
-
-                        float transY = 0f;
-                        float transX = 0f;
-                        try {
-                            transY = row.getTranslationY();
-                            if (transY == 0f) {
-                                Object t = XposedHelpers.callMethod(row, "getTranslation");
-                                if (t instanceof Float) transY = (Float) t;
-                            }
-                            transX = Math.abs(row.getTranslationX());
-                        } catch (Throwable ignored) {}
-
-                        int actualH = 0;
-                        if (sActualHeightField != null) {
-                            try { actualH = sActualHeightField.getInt(bgView); } catch (Throwable ignored) {}
-                        }
-                        if (actualH <= 0 && sGetActualHeightMethod != null) {
-                            try { actualH = (Integer) sGetActualHeightMethod.invoke(row); } catch (Throwable ignored) {}
-                        }
-                        if (actualH <= 0) actualH = bgView.getHeight();
-
-                        if (transY < 0f && actualH > 0) {
-                            motionFraction = Math.min(motionFraction, Math.max(0f, 1.0f + (transY / (float) actualH)));
-                        }
-                        int bgW = bgView.getWidth();
-                        if (transX > 0f && bgW > 0) {
-                            motionFraction = Math.min(motionFraction, Math.max(0f, 1.0f - (transX / (float) bgW)));
-                        }
+                    float effectiveAlpha;
+                    if (isHun) {
+                        effectiveAlpha = Math.max(0f, Math.min(1f, rowAlpha * bgAlpha));
+                    } else {
+                        float keyguardFade = (sStatusBarState == 1) ? Math.min(stackAlpha, sKeyguardAlpha) : stackAlpha;
+                        effectiveAlpha = Math.max(0f, Math.min(1f, rowAlpha * bgAlpha * keyguardFade));
                     }
 
-                    float combinedAlpha = effectiveAlpha * motionFraction;
+                    float combinedAlpha = effectiveAlpha;
 
-                    if (!sScreenAwake || sBouncerFullyShown || sNotificationBlursCleared || combinedAlpha < 0.03f) {
+                    if (!sScreenAwake || (sBouncerFullyShown && !isHun) || combinedAlpha < 0.03f) {
                         if (Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
                             cleanupBlur(bgView);
                         }
@@ -2952,10 +2800,14 @@ public class XposedInit implements IXposedHookLoadPackage {
         if (newState == 0 || newState == 2) {
             sLsToShadeProgress = 1f;
             sFractionToShade = 1f;
-            if (!sNotificationBlursCleared) {
-                sNotificationBlursCleared = true;
-                clearAllNotificationBlurs();
+            sBouncerShowing = false;
+            sBouncerFullyShown = false;
+            sNotificationBlursCleared = false;
+            sKeyguardAlpha = 1.0f;
+            if (sNsslView != null) {
+                sNsslView.setAlpha(1.0f);
             }
+            invalidateNotificationStack();
         } else if (newState == 1 && sScreenAwake && !sBouncerFullyShown) {
             sKeyguardAlpha = 1.0f;
             if (sNsslView != null) {
@@ -2966,6 +2818,24 @@ public class XposedInit implements IXposedHookLoadPackage {
                 invalidateNotificationStack();
             }
         }
+    }
+
+    private static boolean isRowHun(View row) {
+        if (row == null) return false;
+        try {
+            if (sIsPinnedMethod != null && (Boolean) sIsPinnedMethod.invoke(row)) return true;
+        } catch (Throwable ignored) {}
+        try {
+            if (sIsHeadsUpMethod != null && (Boolean) sIsHeadsUpMethod.invoke(row)) return true;
+        } catch (Throwable ignored) {}
+        try {
+            if (sIsHeadsUpStateMethod != null && (Boolean) sIsHeadsUpStateMethod.invoke(row)) return true;
+        } catch (Throwable ignored) {}
+        try {
+            if (sIsHeadsUpAnimatingAwayMethod != null && (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(row)) return true;
+        } catch (Throwable ignored) {}
+        Object tag = row.getTag(TAG_KEY_IS_HUN);
+        return Boolean.TRUE.equals(tag);
     }
 
     private static void onLsToShadeProgressChanged(float progress) {
@@ -3234,6 +3104,10 @@ public class XposedInit implements IXposedHookLoadPackage {
         public void run() {
             synchronized (sAllNotificationBackgrounds) {
                 for (View bgView : sAllNotificationBackgrounds) {
+                    View row = (View) bgView.getTag(TAG_KEY_ROW);
+                    if (row != null && isRowHun(row)) {
+                        continue;
+                    }
                     cleanupBlur(bgView);
                     if (bgView != null) {
                         try {
@@ -3254,6 +3128,10 @@ public class XposedInit implements IXposedHookLoadPackage {
         // 1. Synchronously on current thread: immediately set blur radius to 0 and hide drawable (zero latency)
         synchronized (sAllNotificationBackgrounds) {
             for (View bgView : sAllNotificationBackgrounds) {
+                View row = (View) bgView.getTag(TAG_KEY_ROW);
+                if (row != null && isRowHun(row)) {
+                    continue;
+                }
                 cleanupBlur(bgView);
             }
         }
