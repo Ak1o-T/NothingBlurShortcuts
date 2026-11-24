@@ -1023,20 +1023,24 @@ public class XposedInit implements IXposedHookLoadPackage {
 
             try {
                 Class<?> bouncerRepoCls = cl.loadClass("com.android.systemui.bouncer.data.repository.KeyguardBouncerRepositoryImpl");
-                XposedBridge.hookAllMethods(bouncerRepoCls, "setPrimaryShow", new XC_MethodHook() {
+                XC_MethodHook bouncerRepoShowHook = new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        Log.e(TAG, "KeyguardBouncerRepositoryImpl.setPrimaryShow");
-                        onBouncerShowingChanged(true);
+                        Log.e(TAG, "KeyguardBouncerRepositoryImpl show: " + param.method.getName());
+                        onBouncerShowingChanged(true, "KeyguardBouncerRepositoryImpl." + param.method.getName());
                     }
-                });
-                XposedBridge.hookAllMethods(bouncerRepoCls, "setPrimaryStartingToHide", new XC_MethodHook() {
+                };
+                XC_MethodHook bouncerRepoHideHook = new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        Log.e(TAG, "KeyguardBouncerRepositoryImpl.setPrimaryStartingToHide");
-                        onBouncerShowingChanged(false);
+                        Log.e(TAG, "KeyguardBouncerRepositoryImpl hide: " + param.method.getName());
+                        onBouncerShowingChanged(false, "KeyguardBouncerRepositoryImpl." + param.method.getName());
                     }
-                });
+                };
+                try { XposedBridge.hookAllMethods(bouncerRepoCls, "setPrimaryShow", bouncerRepoShowHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(bouncerRepoCls, "setPrimaryShowingSoon", bouncerRepoShowHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(bouncerRepoCls, "setPrimaryStartingToHide", bouncerRepoHideHook); } catch (Throwable ignored) {}
+                try { XposedBridge.hookAllMethods(bouncerRepoCls, "setPrimaryStartDisappearAnimation", bouncerRepoHideHook); } catch (Throwable ignored) {}
             } catch (Throwable ignored) {}
 
             try {
@@ -2122,9 +2126,15 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     float combinedAlpha = effectiveAlpha * motionFraction;
 
-                    boolean bouncerFullyVisible = sBouncerShowing && (keyguardFade < 0.03f || stackAlpha < 0.03f);
+                    boolean bouncerActive = sBouncerShowing;
+                    if (!bouncerActive && sStatusBarKeyguardViewManager != null) {
+                        try {
+                            bouncerActive = (Boolean) XposedHelpers.callMethod(sStatusBarKeyguardViewManager, "isBouncerShowing");
+                            if (bouncerActive) sBouncerShowing = true;
+                        } catch (Throwable ignored) {}
+                    }
 
-                    if (!sScreenAwake || bouncerFullyVisible || combinedAlpha < 0.03f) {
+                    if (!sScreenAwake || bouncerActive || combinedAlpha < 0.03f) {
                         if (Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
                             cleanupBlur(bgView);
                         }
@@ -2137,7 +2147,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     // according to the continuous gesture progress (shadeProgress: 0.0=Lockscreen -> 1.0=Shade)
                     float blurWeight = isHun ? 1.0f : (1.0f - shadeProgress);
                     float solidWeight = isHun ? 0.0f : shadeProgress;
-                    if (!sScreenAwake || bouncerFullyVisible) {
+                    if (!sScreenAwake || bouncerActive) {
                         blurWeight = 0f;
                         solidWeight = 0f;
                     }
@@ -2900,11 +2910,11 @@ public class XposedInit implements IXposedHookLoadPackage {
         Log.e(TAG, "onBouncerShowingChanged: " + showing + " (" + reason + ")");
         Handler h = getMainHandler();
         if (showing) {
+            sNotificationBlursCleared = true;
             if (h != null) {
                 h.removeCallbacks(sWakeInvalidateRunnable);
             }
-            // Transition is in progress; allow notifications and blurs to fade smoothly with KeyguardRootView alpha
-            invalidateNotificationStack();
+            clearAllNotificationBlurs();
         } else if (sScreenAwake && sStatusBarState == 1) {
             sNotificationBlursCleared = false;
             if (sKeyguardRootView != null) {
