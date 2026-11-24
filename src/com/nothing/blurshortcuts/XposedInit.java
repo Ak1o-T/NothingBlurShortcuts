@@ -551,19 +551,16 @@ public class XposedInit implements IXposedHookLoadPackage {
                                         frosted.draw(nativeCanvas);
                                     }
 
-                                    // 2. Render Widget-style frosted glass plate overlay dynamically adapted to Dark/Light theme
-                                    if (isDark) {
-                                        // Dark theme: translucent smoked glass overlay + subtle specular edge rim
-                                        glassTintPaint.setColor(0x60000000);
-                                        glassBorderPaint.setColor(0x28FFFFFF);
-                                    } else {
-                                        // Light theme: translucent milky white glass overlay + specular edge rim
-                                        glassTintPaint.setColor(0x85FFFFFF);
-                                        glassBorderPaint.setColor(0x38FFFFFF);
-                                    }
+                                    // 2. Render authentic widget-style frosted glass plate matching Nothing OS widgets
+                                    int widgetColor = getFrostedBackdropColor(ctx, isDark);
+                                    glassTintPaint.setColor(widgetColor);
+
+                                    int borderAlpha = isDark ? 0x20 : 0x30;
+                                    glassBorderPaint.setColor((0x00FFFFFF) | (borderAlpha << 24));
+                                    glassBorderPaint.setStrokeWidth(1.0f);
 
                                     nativeCanvas.drawCircle(cx, cy, radius, glassTintPaint);
-                                    nativeCanvas.drawCircle(cx, cy, radius - 1.0f, glassBorderPaint);
+                                    nativeCanvas.drawCircle(cx, cy, radius - 0.5f, glassBorderPaint);
 
                                 } catch (Throwable t) {
                                     Log.e(TAG, "Error in drawBlurBehind lambda: " + t, t);
