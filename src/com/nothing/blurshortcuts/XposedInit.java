@@ -1562,14 +1562,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                     if (param.thisObject instanceof View) {
                         View row = (View) param.thisObject;
-                        boolean isStarting = false;
-                        if (param.args.length > 0 && param.args[0] instanceof Boolean) {
-                            if (Boolean.TRUE.equals(param.args[0])) {
-                                isStarting = true;
-                            }
-                        }
-                        boolean hun = isStarting || isRowHun(row);
-                        row.setTag(TAG_KEY_IS_HUN, hun ? Boolean.TRUE : Boolean.FALSE);
                         if (sBackgroundNormalField != null) {
                             try {
                                 View bgNormal = (View) sBackgroundNormalField.get(row);
@@ -2017,22 +2009,22 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
 
                     // 1. Version 3: Floating Heads-Up Notification (HUN)
+                    // Pinned floating heads-up alert outside the shade
                     boolean isHun = !isShelf && isRowHun(row);
 
                     // 2. Version 1 vs Version 2 Detection:
                     // Determine if row is on Lockscreen / Keyguard
-                    boolean onKeyguard = (sStatusBarState == 1);
+                    // sStatusBarState: 1 = KEYGUARD (pure lockscreen), 2 = SHADE_LOCKED (notification shade), 0 = SHADE (notification shade)
+                    // Notifications on lockscreen are blurred. Notifications in the notification shade (0 or 2) are stock system background (no blur).
+                    int curState = getCurrentStatusBarState();
+                    boolean onKeyguard = (curState == 1 && sStatusBarState == 1);
                     if (!onKeyguard && row != null && sIsOnKeyguardMethod != null) {
                         try {
                             Boolean ok = (Boolean) sIsOnKeyguardMethod.invoke(row);
-                            if (Boolean.TRUE.equals(ok) && sStatusBarState != 0) {
+                            if (Boolean.TRUE.equals(ok) && curState == 1 && sStatusBarState == 1) {
                                 onKeyguard = true;
                             }
                         } catch (Throwable ignored) {}
-                    }
-                    if (!onKeyguard) {
-                        int curState = getCurrentStatusBarState();
-                        if (curState == 1) onKeyguard = true;
                     }
 
                     // Dynamic 120Hz Transition Architecture:
@@ -2277,7 +2269,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                                 topRadius, bottomRadius, sClipPath, isDark, densityF, combinedAlpha);
                     } else {
                         // Version 2: Notification Shade System Card (100% Stock System Background, Zero Blur)
-                        if (solidWeight > 0.01f && !isShelf) {
+                        if (solidWeight > 0.01f) {
                             renderShadeSystemCard(canvas, bgView, ctx, isShelf, drawLeft, drawTop, drawRight, drawBottom,
                                     sClipPath, isDark, combinedAlpha, solidWeight);
                         }
@@ -3035,12 +3027,6 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     private static boolean isRowHun(View row) {
         if (row == null) return false;
-        Object tag = row.getTag(TAG_KEY_IS_HUN);
-        if (Boolean.TRUE.equals(tag)) return true;
-
-        try {
-            if (sIsHeadsUpMethod != null && Boolean.TRUE.equals(sIsHeadsUpMethod.invoke(row))) return true;
-        } catch (Throwable ignored) {}
         try {
             if (sIsPinnedMethod != null && Boolean.TRUE.equals(sIsPinnedMethod.invoke(row))) return true;
         } catch (Throwable ignored) {}
@@ -3049,9 +3035,6 @@ public class XposedInit implements IXposedHookLoadPackage {
         } catch (Throwable ignored) {}
         try {
             if (sIsHeadsUpAnimatingAwayMethod != null && Boolean.TRUE.equals(sIsHeadsUpAnimatingAwayMethod.invoke(row))) return true;
-        } catch (Throwable ignored) {}
-        try {
-            if (sIsHeadsUpStateMethod != null && Boolean.TRUE.equals(sIsHeadsUpStateMethod.invoke(row))) return true;
         } catch (Throwable ignored) {}
         return false;
     }
