@@ -62,6 +62,8 @@ public class XposedInit implements IXposedHookLoadPackage {
     // Status Bar & Shade State tracking
     private static volatile Context sAppContext = null;
     private static volatile View sNsslView = null;
+    private static volatile View sKeyguardRootView = null;
+    private static volatile float sKeyguardAlpha = 1.0f;
     private static volatile View sRootWindowView = null;
     private static volatile Object sStatusBarStateController = null;
     private static volatile Object sAmbientState = null;
@@ -75,6 +77,46 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static volatile boolean sScreenAwake = true;
     private static volatile boolean sBouncerShowing = false;
     private static volatile boolean sInitialized = false;
+
+    private static View getKeyguardRootView(View anyView) {
+        if (sKeyguardRootView != null) return sKeyguardRootView;
+        if (anyView != null) {
+            try {
+                View root = anyView.getRootView();
+                if (root != null) {
+                    int id = root.getResources().getIdentifier("keyguard_root_view", "id", "com.android.systemui");
+                    if (id != 0) {
+                        View krv = root.findViewById(id);
+                        if (krv != null) {
+                            sKeyguardRootView = krv;
+                            return krv;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+        return null;
+    }
+
+    private static void syncNotificationAlpha(float alpha) {
+        if (sStatusBarState == 1 && sNsslView != null) {
+            float current = sNsslView.getAlpha();
+            if (Math.abs(current - alpha) > 0.005f) {
+                sNsslView.setAlpha(alpha);
+            }
+            if (alpha < 0.03f) {
+                if (!sNotificationBlursCleared) {
+                    sNotificationBlursCleared = true;
+                    clearAllNotificationBlurs();
+                }
+            } else if (alpha > 0.05f && sScreenAwake) {
+                if (sNotificationBlursCleared) {
+                    sNotificationBlursCleared = false;
+                }
+                invalidateNotificationStack();
+            }
+        }
+    }
 
     // Global tracking of all notification background views for instant zero-latency blur sleep/wake
     private static final Set<View> sAllNotificationBackgrounds = Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<View, Boolean>()));
@@ -1203,7 +1245,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                             float alpha = (Float) param.args[0];
                             if (alpha < 0.05f && sScreenAwake) {
                                 clearAllNotificationBlurs();
-                            } else if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                            } else if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake) {
                                 invalidateNotificationStack();
                             }
                         }
@@ -1217,7 +1259,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                             float alpha = (Float) param.args[0];
                             if (alpha < 0.05f && sScreenAwake) {
                                 clearAllNotificationBlurs();
-                            } else if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                            } else if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake) {
                                 invalidateNotificationStack();
                             }
                         }
@@ -1231,7 +1273,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                             int vis = (Integer) param.args[0];
                             if (vis != View.VISIBLE && sScreenAwake) {
                                 clearAllNotificationBlurs();
-                            } else if (vis == View.VISIBLE && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                            } else if (vis == View.VISIBLE && sStatusBarState == 1 && sScreenAwake) {
                                 invalidateNotificationStack();
                             }
                         }
@@ -1248,7 +1290,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                             float alpha = (Float) param.args[0];
                             if (alpha < 0.05f && sScreenAwake) {
                                 clearAllNotificationBlurs();
-                            } else if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                            } else if (alpha > 0.05f && sStatusBarState == 1 && sScreenAwake) {
                                 invalidateNotificationStack();
                             }
                         }
@@ -1261,13 +1303,66 @@ public class XposedInit implements IXposedHookLoadPackage {
                             int vis = (Integer) param.args[0];
                             if (vis != View.VISIBLE && sScreenAwake) {
                                 clearAllNotificationBlurs();
-                            } else if (vis == View.VISIBLE && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                            } else if (vis == View.VISIBLE && sStatusBarState == 1 && sScreenAwake) {
                                 invalidateNotificationStack();
                             }
                         }
                     }
                 });
             } catch (Throwable ignored) {}
+
+            try {
+                Class<?> krvCls = cl.loadClass("com.android.systemui.keyguard.ui.view.KeyguardRootView");
+                XposedBridge.hookAllConstructors(krvCls, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sKeyguardRootView = (View) param.thisObject;
+                    }
+                });
+                XposedBridge.hookAllMethods(krvCls, "onAttachedToWindow", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sKeyguardRootView = (View) param.thisObject;
+                    }
+                });
+                XposedBridge.hookAllMethods(krvCls, "setAlpha", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sKeyguardRootView = (View) param.thisObject;
+                        if (param.args.length > 0 && param.args[0] instanceof Float) {
+                            float alpha = (Float) param.args[0];
+                            sKeyguardAlpha = alpha;
+                            syncNotificationAlpha(alpha);
+                        }
+                    }
+                });
+                XposedBridge.hookAllMethods(krvCls, "dispatchDraw", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        sKeyguardRootView = (View) param.thisObject;
+                        float alpha = sKeyguardRootView.getAlpha();
+                        if (Math.abs(sKeyguardAlpha - alpha) > 0.001f) {
+                            sKeyguardAlpha = alpha;
+                            syncNotificationAlpha(alpha);
+                        }
+                    }
+                });
+                XposedBridge.hookAllMethods(krvCls, "setVisibility", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sKeyguardRootView = (View) param.thisObject;
+                        if (param.args.length > 0 && param.args[0] instanceof Integer) {
+                            int vis = (Integer) param.args[0];
+                            if (vis != View.VISIBLE) {
+                                sKeyguardAlpha = 0f;
+                                syncNotificationAlpha(0f);
+                            }
+                        }
+                    }
+                });
+            } catch (Throwable t) {
+                Log.e(TAG, "KeyguardRootView hook error: " + t);
+            }
 
             Class<?> notifBgClass = cl.loadClass("com.android.systemui.statusbar.notification.row.NotificationBackgroundView");
             Class<?> notifRowClass = cl.loadClass("com.android.systemui.statusbar.notification.row.ExpandableNotificationRow");
@@ -1867,6 +1962,16 @@ public class XposedInit implements IXposedHookLoadPackage {
                     if (sNsslView != null) {
                         try { stackAlpha = sNsslView.getAlpha(); } catch (Throwable ignored) {}
                     }
+                    View krv = getKeyguardRootView(bgView);
+                    if (krv != null) {
+                        try {
+                            if (krv.getVisibility() != View.VISIBLE) {
+                                sKeyguardAlpha = 0f;
+                            } else {
+                                sKeyguardAlpha = krv.getAlpha();
+                            }
+                        } catch (Throwable ignored) {}
+                    }
                     float rowAlpha = 1.0f;
                     if (row != null) {
                         try { rowAlpha = row.getAlpha(); } catch (Throwable ignored) {}
@@ -1874,7 +1979,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                         try { rowAlpha = parent.getAlpha(); } catch (Throwable ignored) {}
                     }
                     float bgAlpha = bgView.getAlpha();
-                    float effectiveAlpha = Math.max(0f, Math.min(1f, rowAlpha * bgAlpha));
+
+                    float keyguardFade = (sStatusBarState == 1) ? Math.min(stackAlpha, sKeyguardAlpha) : stackAlpha;
+                    float effectiveAlpha = Math.max(0f, Math.min(1f, rowAlpha * bgAlpha * keyguardFade));
 
                     float motionFraction = 1.0f;
                     if (isHun && row != null) {
@@ -1996,7 +2103,9 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     float combinedAlpha = effectiveAlpha * motionFraction;
 
-                    if (!sScreenAwake || sBouncerShowing || stackAlpha < 0.05f || combinedAlpha < 0.03f) {
+                    boolean bouncerFullyVisible = sBouncerShowing && (keyguardFade < 0.03f || stackAlpha < 0.03f);
+
+                    if (!sScreenAwake || bouncerFullyVisible || combinedAlpha < 0.03f) {
                         if (Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
                             cleanupBlur(bgView);
                         }
@@ -2011,10 +2120,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                     //   - Heads-Up floating banner alerts over apps (isHun && !inShade)
                     // View 2 - Classic Solid Stock System Background Mode applies to:
                     //   - All notifications in Notification Shade menu (inShade == true)
-                    //   - Bouncer PIN/password screen
+                    //   - Bouncer PIN/password screen (when fully visible)
                     //   - Colorized media player with album art
                     boolean isTarget = false;
-                    if (sScreenAwake && !sBouncerShowing && !isColorized) {
+                    if (sScreenAwake && !bouncerFullyVisible && !isColorized) {
                         if (isHun) {
                             isTarget = true;
                         } else if (onKeyguard && !inShade) {
@@ -2721,6 +2830,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                 clearAllNotificationBlurs();
             }
         } else if (newState == 1 && sScreenAwake && !sBouncerShowing) {
+            sKeyguardAlpha = 1.0f;
+            if (sNsslView != null) {
+                sNsslView.setAlpha(1.0f);
+            }
             if (sNotificationBlursCleared) {
                 sNotificationBlursCleared = false;
                 invalidateNotificationStack();
@@ -2736,6 +2849,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                 clearAllNotificationBlurs();
             }
         } else if (progress <= 0.05f && sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+            sKeyguardAlpha = 1.0f;
+            if (sNsslView != null) {
+                sNsslView.setAlpha(1.0f);
+            }
             if (sNotificationBlursCleared) {
                 sNotificationBlursCleared = false;
                 invalidateNotificationStack();
@@ -2752,9 +2869,14 @@ public class XposedInit implements IXposedHookLoadPackage {
             if (h != null) {
                 h.removeCallbacks(sWakeInvalidateRunnable);
             }
-            clearAllNotificationBlurs();
+            // Transition is in progress; allow notifications and blurs to fade smoothly with KeyguardRootView alpha
             invalidateNotificationStack();
         } else if (sScreenAwake && sStatusBarState == 1) {
+            sKeyguardAlpha = 1.0f;
+            sNotificationBlursCleared = false;
+            if (sNsslView != null) {
+                sNsslView.setAlpha(1.0f);
+            }
             invalidateNotificationStack();
             if (h != null) {
                 h.removeCallbacks(sWakeInvalidateRunnable);
@@ -2905,6 +3027,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                 } catch (Throwable ignored) {}
             }
             if (sScreenAwake && !sBouncerShowing && sStatusBarState == 1) {
+                sKeyguardAlpha = 1.0f;
+                if (sNsslView != null) {
+                    sNsslView.setAlpha(1.0f);
+                }
                 invalidateNotificationStack();
             }
         }
@@ -2928,6 +3054,10 @@ public class XposedInit implements IXposedHookLoadPackage {
             return;
         }
 
+        sKeyguardAlpha = 1.0f;
+        if (sNsslView != null) {
+            sNsslView.setAlpha(1.0f);
+        }
         invalidateNotificationStack();
 
         Handler h = getMainHandler();
