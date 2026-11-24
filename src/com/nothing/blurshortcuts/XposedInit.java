@@ -158,6 +158,14 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static volatile int sCachedFrostedColorLight = 0;
     private static volatile int sLastColorCacheUiMode = -1;
 
+    // Fast Tag IDs for notification caching (application-specific range 0x7f0b91xx)
+    private static final int TAG_KEY_ROW = 0x7f0b9101;
+    private static final int TAG_KEY_IS_HUN = 0x7f0b9102;
+    private static final int TAG_KEY_IS_COLORIZED = 0x7f0b9103;
+    private static final int TAG_KEY_RIPPLE = 0x7f0b9104;
+    private static final int TAG_KEY_BLUR_ACTIVE = 0x7f0b9105;
+    private static final int TAG_KEY_LAST_BLUR_RADIUS = 0x7f0b9106;
+
     // Cached Volume Dialog resource IDs for zero-overhead styling
     private static int sIdExpandContainer = -1;
     private static int sIdVolumeBg = -1;
@@ -1404,6 +1412,38 @@ public class XposedInit implements IXposedHookLoadPackage {
             try { XposedBridge.hookAllMethods(notifRowClass, "setShowingExpanded", rowExpansionHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifRowClass, "setGroupExpanded", rowExpansionHook); } catch (Throwable ignored) {}
 
+            XC_MethodHook hunStateHook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    if (param.thisObject instanceof View) {
+                        View row = (View) param.thisObject;
+                        boolean isPinned = false;
+                        if (sIsPinnedMethod != null) {
+                            try { isPinned = (Boolean) sIsPinnedMethod.invoke(row); } catch (Throwable ignored) {}
+                        }
+                        boolean animatingAway = false;
+                        if (sIsHeadsUpAnimatingAwayMethod != null) {
+                            try { animatingAway = (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(row); } catch (Throwable ignored) {}
+                        }
+                        boolean isHun = isPinned || animatingAway;
+                        row.setTag(TAG_KEY_IS_HUN, isHun ? Boolean.TRUE : Boolean.FALSE);
+                    }
+                }
+            };
+            try { XposedBridge.hookAllMethods(notifRowClass, "setPinned", hunStateHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "setHeadsUp", hunStateHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "setHeadsUpAnimatingAway", hunStateHook); } catch (Throwable ignored) {}
+            try {
+                XposedBridge.hookAllMethods(notifRowClass, "setColorized", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (param.thisObject instanceof View && param.args.length > 0 && param.args[0] instanceof Boolean) {
+                            ((View) param.thisObject).setTag(TAG_KEY_IS_COLORIZED, param.args[0]);
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {}
+
             XC_MethodHook headsUpAnimatingAwayHook = new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
@@ -1413,6 +1453,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                         if (param.args.length > 0 && param.args[0] instanceof Boolean) {
                             animatingAway = (Boolean) param.args[0];
                         }
+                        row.setTag(TAG_KEY_IS_HUN, animatingAway ? Boolean.TRUE : Boolean.FALSE);
                         if (!animatingAway) {
                             if (sBackgroundNormalField != null) {
                                 try {
@@ -1438,30 +1479,17 @@ public class XposedInit implements IXposedHookLoadPackage {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                     View row = (View) param.thisObject;
-                    if (row != null) {
-                        boolean isHun = false;
-                        if (sIsPinnedMethod != null) {
-                            try { isHun = (Boolean) sIsPinnedMethod.invoke(row); } catch (Throwable ignored) {}
-                        }
-                        if (!isHun && sIsHeadsUpAnimatingAwayMethod != null) {
-                            try { isHun = (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(row); } catch (Throwable ignored) {}
-                        }
-                        if (!isHun && sIsHeadsUpMethod != null) {
-                            try { isHun = (Boolean) sIsHeadsUpMethod.invoke(row); } catch (Throwable ignored) {}
-                        }
-                        if (isHun) {
-                            if (sBackgroundNormalField != null) {
-                                try {
-                                    View bgNormal = (View) sBackgroundNormalField.get(row);
-                                    if (bgNormal != null) bgNormal.invalidate();
-                                } catch (Throwable ignored) {}
-                            }
+                    if (row != null && row.getTag(TAG_KEY_IS_HUN) == Boolean.TRUE) {
+                        if (sBackgroundNormalField != null) {
+                            try {
+                                View bgNormal = (View) sBackgroundNormalField.get(row);
+                                if (bgNormal != null) bgNormal.invalidate();
+                            } catch (Throwable ignored) {}
                         }
                     }
                 }
             };
             try { XposedBridge.hookAllMethods(notifRowClass, "setTranslation", hunMotionHook); } catch (Throwable ignored) {}
-            try { XposedBridge.hookAllMethods(notifRowClass, "setActualHeight", hunMotionHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifRowClass, "setClipTopAmount", hunMotionHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifRowClass, "setClipBottomAmount", hunMotionHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifRowClass, "applyLaunchAnimationParams", hunMotionHook); } catch (Throwable ignored) {}
@@ -1486,20 +1514,11 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         if (param.args.length > 0 && param.args[0] instanceof View) {
                             View row = (View) param.args[0];
-                            if (notifRowClass != null && notifRowClass.isAssignableFrom(row.getClass())) {
-                                boolean isHun = false;
-                                if (sIsPinnedMethod != null) {
-                                    try { isHun = (Boolean) sIsPinnedMethod.invoke(row); } catch (Throwable ignored) {}
-                                }
-                                if (!isHun && sIsHeadsUpAnimatingAwayMethod != null) {
-                                    try { isHun = (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(row); } catch (Throwable ignored) {}
-                                }
-                                if (isHun && sBackgroundNormalField != null) {
-                                    try {
-                                        View bgNormal = (View) sBackgroundNormalField.get(row);
-                                        if (bgNormal != null) bgNormal.invalidate();
-                                    } catch (Throwable ignored) {}
-                                }
+                            if (row.getTag(TAG_KEY_IS_HUN) == Boolean.TRUE && sBackgroundNormalField != null) {
+                                try {
+                                    View bgNormal = (View) sBackgroundNormalField.get(row);
+                                    if (bgNormal != null) bgNormal.invalidate();
+                                } catch (Throwable ignored) {}
                             }
                         }
                     }
@@ -1527,7 +1546,7 @@ public class XposedInit implements IXposedHookLoadPackage {
 // onAppearAnimationFinished hook removed to avoid premature blur cleanup
             } catch (Throwable ignored) {}
 
-            // Hook PropertyAnimator to track every animated property on notification rows (translationY, scale, alpha)
+            // Hook PropertyAnimator only for Heads-Up notification rows to track animated motion
             try {
                 Class<?> paCls = cl.loadClass("com.android.systemui.statusbar.notification.PropertyAnimator");
                 Class<?> apCls = cl.loadClass("com.android.systemui.statusbar.notification.AnimatableProperty");
@@ -1538,7 +1557,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         if (param.args.length > 1 && param.args[0] instanceof View && param.args[1] != null) {
                             final View targetView = (View) param.args[0];
-                            if (notifRowClass != null && notifRowClass.isAssignableFrom(targetView.getClass())) {
+                            if (targetView.getTag(TAG_KEY_IS_HUN) == Boolean.TRUE) {
                                 int tag = (Integer) getAnimTagMethod.invoke(param.args[1]);
                                 Object anim = targetView.getTag(tag);
                                 if (anim instanceof ValueAnimator) {
@@ -1636,10 +1655,12 @@ public class XposedInit implements IXposedHookLoadPackage {
                                 View shelf = (View) param.thisObject;
                                 if (shelf != null) {
                                     shelf.invalidate();
-                                    try {
-                                        View bg = (View) XposedHelpers.getObjectField(shelf, "mBackgroundNormal");
-                                        if (bg != null) bg.invalidate();
-                                    } catch (Throwable ignored) {}
+                                    if (sBackgroundNormalField != null) {
+                                        try {
+                                            View bg = (View) sBackgroundNormalField.get(shelf);
+                                            if (bg != null) bg.invalidate();
+                                        } catch (Throwable ignored) {}
+                                    }
                                 }
                             }
                         }
@@ -1665,21 +1686,18 @@ public class XposedInit implements IXposedHookLoadPackage {
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                     if (param.thisObject instanceof View) {
                         View row = (View) param.thisObject;
-                        try {
-                            View bg = (View) XposedHelpers.getObjectField(row, "mBackgroundNormal");
-                            if (bg != null) bg.invalidate();
-                        } catch (Throwable ignored) {}
-                        try {
-                            View bgDimmed = (View) XposedHelpers.getObjectField(row, "mBackgroundDimmed");
-                            if (bgDimmed != null) bgDimmed.invalidate();
-                        } catch (Throwable ignored) {}
+                        if (sBackgroundNormalField != null) {
+                            try {
+                                View bg = (View) sBackgroundNormalField.get(row);
+                                if (bg != null) bg.invalidate();
+                            } catch (Throwable ignored) {}
+                        }
                     }
                 }
             };
             try { XposedBridge.hookAllMethods(notifRowClass, "setActualHeight", rowHeightHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifRowClass, "setActualHeightAnimating", rowHeightHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifRowClass, "setFinalActualHeight", rowHeightHook); } catch (Throwable ignored) {}
-            try { XposedBridge.hookAllMethods(notifRowClass, "setUserExpanded", rowHeightHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifRowClass, "setSystemExpanded", rowHeightHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifRowClass, "setChildrenExpanded", rowHeightHook); } catch (Throwable ignored) {}
             try { XposedBridge.hookAllMethods(notifRowClass, "onExpandedByGesture", rowHeightHook); } catch (Throwable ignored) {}
@@ -1758,11 +1776,22 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
 
                     // 4. Fast direct method invocation on parent row / shelf
-                    View row = parent;
-                    while (row != null && notifRowClass != null && !notifRowClass.isAssignableFrom(row.getClass())
-                            && !(shelfCls != null && shelfCls.isAssignableFrom(row.getClass()))) {
-                        ViewParent vp = row.getParent();
-                        row = (vp instanceof View) ? (View) vp : null;
+                    View row = (View) bgView.getTag(TAG_KEY_ROW);
+                    if (row == null && parent != null) {
+                        if (notifRowClass != null && notifRowClass.isAssignableFrom(parent.getClass())) {
+                            row = parent;
+                        } else {
+                            View p = parent;
+                            while (p != null && notifRowClass != null && !notifRowClass.isAssignableFrom(p.getClass())
+                                    && !(shelfCls != null && shelfCls.isAssignableFrom(p.getClass()))) {
+                                ViewParent vp = p.getParent();
+                                p = (vp instanceof View) ? (View) vp : null;
+                            }
+                            row = p;
+                        }
+                        if (row != null) {
+                            bgView.setTag(TAG_KEY_ROW, row);
+                        }
                     }
 
                     String bgCls = bgView.getClass().getName();
@@ -1777,7 +1806,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                             Object normalBg = (sBackgroundNormalField != null) ? sBackgroundNormalField.get(row)
                                     : XposedHelpers.getObjectField(row, "mBackgroundNormal");
                             if (normalBg != null && bgView != normalBg) {
-                                cleanupBlur(bgView);
                                 param.setResult(null);
                                 return;
                             }
@@ -1805,35 +1833,28 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     boolean isHun = false;
                     boolean isColorized = false;
-                    if (!isShelf && row != null && notifRowClass.isAssignableFrom(row.getClass())) {
-                        if (sIsPinnedMethod != null) {
-                            try { isHun = (Boolean) sIsPinnedMethod.invoke(row); } catch (Throwable ignored) {}
+                    if (!isShelf && row != null) {
+                        Object hunTag = row.getTag(TAG_KEY_IS_HUN);
+                        if (hunTag instanceof Boolean) {
+                            isHun = (Boolean) hunTag;
                         } else {
-                            try { isHun = (Boolean) XposedHelpers.callMethod(row, "isPinned"); } catch (Throwable ignored) {}
-                        }
-                        if (!isHun && sIsHeadsUpMethod != null) {
-                            try { isHun = (Boolean) sIsHeadsUpMethod.invoke(row); } catch (Throwable ignored) {}
-                        }
-                        if (!isHun && sIsPinnedAndExpandedMethod != null) {
-                            try { isHun = (Boolean) sIsPinnedAndExpandedMethod.invoke(row); } catch (Throwable ignored) {}
-                        }
-                        if (!isHun && sIsHeadsUpStateMethod != null) {
-                            try { isHun = (Boolean) sIsHeadsUpStateMethod.invoke(row); } catch (Throwable ignored) {}
-                        }
-                        if (!isHun && sIsHeadsUpAnimatingAwayMethod != null) {
-                            try { isHun = (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(row); } catch (Throwable ignored) {}
-                        }
-                        if (!isHun) {
-                            try { isHun = (Boolean) XposedHelpers.callMethod(row, "isHeadsUpAnimatingAway"); } catch (Throwable ignored) {}
-                        }
-                        if (!isHun) {
-                            try { isHun = (Boolean) XposedHelpers.callMethod(row, "isHeadsUpOrAnimatingAway"); } catch (Throwable ignored) {}
+                            if (sIsPinnedMethod != null) {
+                                try { isHun = (Boolean) sIsPinnedMethod.invoke(row); } catch (Throwable ignored) {}
+                            }
+                            if (!isHun && sIsHeadsUpAnimatingAwayMethod != null) {
+                                try { isHun = (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(row); } catch (Throwable ignored) {}
+                            }
+                            row.setTag(TAG_KEY_IS_HUN, isHun ? Boolean.TRUE : Boolean.FALSE);
                         }
 
-                        if (sIsColorizedMethod != null) {
-                            try { isColorized = (Boolean) sIsColorizedMethod.invoke(row); } catch (Throwable ignored) {}
+                        Object colTag = row.getTag(TAG_KEY_IS_COLORIZED);
+                        if (colTag instanceof Boolean) {
+                            isColorized = (Boolean) colTag;
                         } else {
-                            try { isColorized = (Boolean) XposedHelpers.callMethod(row, "isColorized"); } catch (Throwable ignored) {}
+                            if (sIsColorizedMethod != null) {
+                                try { isColorized = (Boolean) sIsColorizedMethod.invoke(row); } catch (Throwable ignored) {}
+                            }
+                            row.setTag(TAG_KEY_IS_COLORIZED, isColorized ? Boolean.TRUE : Boolean.FALSE);
                         }
                     }
 
@@ -1917,14 +1938,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                                             try { clipB = sClipBottomAmountField.getInt(bgV); } catch (Throwable ignored) {}
                                         }
 
-                                        boolean animatingAway = false;
-                                        if (sIsHeadsUpAnimatingAwayMethod != null) {
-                                            try { animatingAway = (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(rowView); } catch (Throwable ignored) {}
-                                        }
-
-                                        boolean isMoving = animatingAway || y != 0f || x != 0f || a < 0.99f || sx != 1f || sy != 1f
-                                                || y != lastY || x != lastX || a != lastAlpha || sx != lastScaleX || sy != lastScaleY
-                                                || h != lastH || clipT != lastClipTop || clipB != lastClipBottom;
+                                        boolean changed = (!Float.isNaN(lastY)) && (
+                                                y != lastY || x != lastX || a != lastAlpha || sx != lastScaleX || sy != lastScaleY
+                                                || h != lastH || clipT != lastClipTop || clipB != lastClipBottom);
 
                                         lastY = y;
                                         lastX = x;
@@ -1935,7 +1951,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                                         lastClipTop = clipT;
                                         lastClipBottom = clipB;
 
-                                        if (isMoving) {
+                                        if (changed) {
                                             bgV.invalidate();
                                         }
                                         return true;
@@ -1981,7 +1997,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                     float combinedAlpha = effectiveAlpha * motionFraction;
 
                     if (!sScreenAwake || sBouncerShowing || stackAlpha < 0.05f || combinedAlpha < 0.03f) {
-                        cleanupBlur(bgView);
+                        if (Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
+                            cleanupBlur(bgView);
+                        }
                         param.setResult(null);
                         return;
                     }
@@ -2022,7 +2040,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
                     }
                     if (showNoBg && !isShelf) {
-                        cleanupBlur(bgView);
+                        if (Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
+                            cleanupBlur(bgView);
+                        }
                         param.setResult(null);
                         return;
                     }
@@ -2093,7 +2113,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                     int drawBottom = clipBottom > 0 ? (actualHeight - clipBottom) : actualHeight;
 
                     if (drawRight <= drawLeft || drawBottom <= drawTop) {
-                        cleanupBlur(bgView);
+                        if (Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
+                            cleanupBlur(bgView);
+                        }
                         param.setResult(null);
                         return;
                     }
@@ -2142,6 +2164,8 @@ public class XposedInit implements IXposedHookLoadPackage {
                     canvas.clipPath(sClipPath);
 
                     if (isTarget) {
+                        bgView.setTag(TAG_KEY_BLUR_ACTIVE, Boolean.TRUE);
+
                         // View 1: Frosted Glass Blur Mode (Lockscreen & Shelf Collage & Floating HUN)
                         // 1. Hardware RenderNode Wallpaper Blur (SurfaceFlinger)
                         Object blurDrawable = null;
@@ -2180,14 +2204,18 @@ public class XposedInit implements IXposedHookLoadPackage {
                                 try { XposedHelpers.callMethod(blurDrawable, "setColor", 0); } catch (Throwable ignored) {}
                             }
 
-                            int dynamicRadius = Math.max(1, Math.round(160 * combinedAlpha));
-                            if (sSetBlurRadiusMethod != null) {
-                                try { sSetBlurRadiusMethod.invoke(blurDrawable, dynamicRadius); } catch (Throwable ignored) {}
-                            } else {
-                                try { XposedHelpers.callMethod(blurDrawable, "setBlurRadius", dynamicRadius); } catch (Throwable ignored) {}
+                            final int CONSTANT_BLUR_RADIUS = 150;
+                            Integer lastRadius = (Integer) bgView.getTag(TAG_KEY_LAST_BLUR_RADIUS);
+                            if (lastRadius == null || lastRadius != CONSTANT_BLUR_RADIUS) {
+                                if (sSetBlurRadiusMethod != null) {
+                                    try { sSetBlurRadiusMethod.invoke(blurDrawable, CONSTANT_BLUR_RADIUS); } catch (Throwable ignored) {}
+                                } else {
+                                    try { XposedHelpers.callMethod(blurDrawable, "setBlurRadius", CONSTANT_BLUR_RADIUS); } catch (Throwable ignored) {}
+                                }
+                                bgView.setTag(TAG_KEY_LAST_BLUR_RADIUS, CONSTANT_BLUR_RADIUS);
                             }
                             try {
-                                ((Drawable) blurDrawable).setAlpha(Math.round(255 * combinedAlpha));
+                                ((Drawable) blurDrawable).setAlpha(Math.max(0, Math.min(255, Math.round(255 * combinedAlpha))));
                             } catch (Throwable ignored) {}
 
                             if (sSetCornerRadiusMethod != null) {
@@ -2221,8 +2249,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                         canvas.save(); // Save again for ripple/restore
                     } else {
                         // View 2: Classic Stock System Background Mode (Notification Shade Menu)
-                        // Turn off hardware blur so SurfaceFlinger punches no hole
-                        cleanupBlur(bgView);
+                        // Turn off hardware blur once when switching modes so SurfaceFlinger punches no hole
+                        if (Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
+                            cleanupBlur(bgView);
+                        }
 
                         // Draw authentic uniform solid system plate
                         int solidColor = resolveStockNotifColor(bgView);
@@ -2231,24 +2261,34 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
 
                     // 3. Ripple effect for touch feedback on all notification cards
-                    try {
-                        Object bgObj = (sBackgroundField != null) ? sBackgroundField.get(bgView)
-                                : XposedHelpers.getObjectField(bgView, "mBackground");
-                        if (bgObj instanceof android.graphics.drawable.LayerDrawable) {
-                            android.graphics.drawable.LayerDrawable ld = (android.graphics.drawable.LayerDrawable) bgObj;
-                            for (int i = 0; i < ld.getNumberOfLayers(); i++) {
-                                Drawable layer = ld.getDrawable(i);
-                                if (layer instanceof android.graphics.drawable.RippleDrawable) {
-                                    layer.setBounds(drawLeft, drawTop, drawRight, drawBottom);
-                                    layer.draw(canvas);
+                    Drawable ripple = (Drawable) bgView.getTag(TAG_KEY_RIPPLE);
+                    if (ripple == null) {
+                        try {
+                            Object bgObj = (sBackgroundField != null) ? sBackgroundField.get(bgView)
+                                    : XposedHelpers.getObjectField(bgView, "mBackground");
+                            if (bgObj instanceof android.graphics.drawable.LayerDrawable) {
+                                android.graphics.drawable.LayerDrawable ld = (android.graphics.drawable.LayerDrawable) bgObj;
+                                for (int i = 0; i < ld.getNumberOfLayers(); i++) {
+                                    Drawable layer = ld.getDrawable(i);
+                                    if (layer instanceof android.graphics.drawable.RippleDrawable) {
+                                        ripple = layer;
+                                        break;
+                                    }
                                 }
+                            } else if (bgObj instanceof android.graphics.drawable.RippleDrawable) {
+                                ripple = (Drawable) bgObj;
                             }
-                        } else if (bgObj instanceof android.graphics.drawable.RippleDrawable) {
-                            Drawable rd = (Drawable) bgObj;
-                            rd.setBounds(drawLeft, drawTop, drawRight, drawBottom);
-                            rd.draw(canvas);
-                        }
-                    } catch (Throwable ignored) {}
+                            if (ripple != null) {
+                                bgView.setTag(TAG_KEY_RIPPLE, ripple);
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                    if (ripple != null) {
+                        try {
+                            ripple.setBounds(drawLeft, drawTop, drawRight, drawBottom);
+                            ripple.draw(canvas);
+                        } catch (Throwable ignored) {}
+                    }
 
                     canvas.restore();
 
@@ -2955,42 +2995,17 @@ public class XposedInit implements IXposedHookLoadPackage {
             }
         }
         try {
-            Object bd = null;
-            if (sBackgroundBlurDrawableField != null) {
-                bd = sBackgroundBlurDrawableField.get(bgView);
-            } else {
-                bd = XposedHelpers.getObjectField(bgView, "mBackgroundBlurDrawable");
-            }
-            if (bd != null) {
-                if (sSetBlurRadiusMethod != null) {
-                    try { sSetBlurRadiusMethod.invoke(bd, 0); } catch (Throwable ignored) {}
-                } else {
-                    try { XposedHelpers.callMethod(bd, "setBlurRadius", 0); } catch (Throwable ignored) {}
+            Object bd = (sBackgroundBlurDrawableField != null) ? sBackgroundBlurDrawableField.get(bgView)
+                    : XposedHelpers.getObjectField(bgView, "mBackgroundBlurDrawable");
+            if (bd instanceof Drawable) {
+                Drawable d = (Drawable) bd;
+                if (d.isVisible()) {
+                    d.setAlpha(0);
+                    d.setVisible(false, false);
                 }
-
-                if (sSetColorMethod != null) {
-                    try { sSetColorMethod.invoke(bd, 0); } catch (Throwable ignored) {}
-                } else {
-                    try { XposedHelpers.callMethod(bd, "setColor", 0); } catch (Throwable ignored) {}
-                }
-
-                try {
-                    ((Drawable) bd).setAlpha(0);
-                } catch (Throwable ignored) {}
-
-                try {
-                    ((Drawable) bd).setVisible(false, false);
-                } catch (Throwable ignored) {}
-
-                try {
-                    Object vri = (sGetViewRootImplMethod != null) ? sGetViewRootImplMethod.invoke(bgView)
-                            : XposedHelpers.callMethod(bgView, "getViewRootImpl");
-                    if (vri != null) {
-                        XposedHelpers.callMethod(vri, "scheduleTraversals");
-                    }
-                } catch (Throwable ignored) {}
             }
         } catch (Throwable ignored) {}
+        bgView.setTag(TAG_KEY_BLUR_ACTIVE, Boolean.FALSE);
     }
 
     private static Canvas getNativeCanvas(Object composeCanvas) {
