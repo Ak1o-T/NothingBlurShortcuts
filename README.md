@@ -80,8 +80,15 @@ A pure Magisk or KernelSU overlay (Runtime Resource Overlay) can only modify sta
 
 ## 📱 Compatibility
 
-- **Nothing OS 5.0 (Android 17)**
-- Tested on Nothing Phone (3) (`A024`)
+Requires a Nothing smartphone running **Nothing OS 5.0 (Android 17)**:
+
+- **Nothing Phone (3)** (`A024`) — Tested and confirmed working ✅
+
+> [!WARNING]
+> **Important Notice:**
+> This module is designed **strictly for Nothing OS smartphones**. It relies directly on Nothing OS's proprietary system classes (`FrostedBackdropProvider`, `FrostedBackdropDrawable`, etc.).
+> 
+> Testing was conducted exclusively on **Nothing Phone (3)**. Other models have not been verified. **Install on any other model at your own risk!**
 
 ---
 
@@ -177,8 +184,15 @@ Output signed APK: `bin/NothingBlurShortcuts.apk`.
 
 ## 📱 Совместимость с устройствами
 
-- **Nothing OS 5.0 (Android 17)**
-- Протестировано на Nothing Phone (3) (`A024`)
+Требуется смартфон Nothing с оболочкой **Nothing OS 5.0 (Android 17)**:
+
+- **Nothing Phone (3)** (`A024`) — Протестировано и подтверждено ✅
+
+> [!WARNING]
+> **Важное предупреждение:**
+> Этот модуль предназначен **исключительно для смартфонов Nothing**. Он напрямую взаимодействует с фирменными системными классами Nothing OS (`FrostedBackdropProvider`, `FrostedBackdropDrawable` и др.).
+> 
+> Тестирование проводилось исключительно на **Nothing Phone (3)**. Работоспособность на других моделях не проверялась. **Устанавливайте на любые другие модели исключительно на свой страх и риск!**
 
 ---
 
