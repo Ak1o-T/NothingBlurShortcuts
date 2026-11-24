@@ -76,6 +76,7 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static volatile float sFractionToShade = 0.0f;
     private static volatile boolean sScreenAwake = true;
     private static volatile boolean sBouncerShowing = false;
+    private static volatile boolean sBouncerFullyShown = false;
     private static volatile boolean sInitialized = false;
 
     private static View getKeyguardRootView(View anyView) {
@@ -109,7 +110,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     sNotificationBlursCleared = true;
                     clearAllNotificationBlurs();
                 }
-            } else if (alpha > 0.05f && sScreenAwake) {
+            } else if (alpha > 0.05f && sScreenAwake && !sBouncerFullyShown) {
                 if (sNotificationBlursCleared) {
                     sNotificationBlursCleared = false;
                     invalidateNotificationStack();
@@ -1066,7 +1067,23 @@ public class XposedInit implements IXposedHookLoadPackage {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         if (!sBouncerShowing) {
-                            onBouncerShowingChanged(true);
+                            onBouncerShowingChanged(true, "KeyguardSecurityContainer.dispatchDraw");
+                        }
+                        if (param.thisObject instanceof View) {
+                            View ksc = (View) param.thisObject;
+                            float kscAlpha = ksc.getAlpha();
+                            float transY = Math.abs(ksc.getTranslationY());
+                            if (kscAlpha >= 0.85f && transY < 50f) {
+                                sBouncerFullyShown = true;
+                                if (!sNotificationBlursCleared || sKeyguardAlpha > 0.01f) {
+                                    sNotificationBlursCleared = true;
+                                    sKeyguardAlpha = 0f;
+                                    if (sNsslView != null) {
+                                        sNsslView.setAlpha(0f);
+                                    }
+                                    clearAllNotificationBlurs();
+                                }
+                            }
                         }
                     }
                 });
@@ -1716,7 +1733,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     XC_MethodHook shelfInvalidateHook = new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            if (sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                            if (sStatusBarState == 1 && sScreenAwake && !sBouncerFullyShown) {
                                 View shelf = (View) param.thisObject;
                                 if (shelf != null) {
                                     shelf.invalidate();
@@ -1737,7 +1754,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                         XposedBridge.hookAllMethods(notifShelfClass, "setHideBackground", new XC_MethodHook() {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                if (sStatusBarState == 1 && sScreenAwake && !sBouncerShowing) {
+                                if (sStatusBarState == 1 && sScreenAwake && !sBouncerFullyShown) {
                                     param.args[0] = false;
                                 }
                             }
@@ -2126,15 +2143,7 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     float combinedAlpha = effectiveAlpha * motionFraction;
 
-                    boolean bouncerActive = sBouncerShowing;
-                    if (!bouncerActive && sStatusBarKeyguardViewManager != null) {
-                        try {
-                            bouncerActive = (Boolean) XposedHelpers.callMethod(sStatusBarKeyguardViewManager, "isBouncerShowing");
-                            if (bouncerActive) sBouncerShowing = true;
-                        } catch (Throwable ignored) {}
-                    }
-
-                    if (!sScreenAwake || bouncerActive || combinedAlpha < 0.03f) {
+                    if (!sScreenAwake || sBouncerFullyShown || sNotificationBlursCleared || combinedAlpha < 0.03f) {
                         if (Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
                             cleanupBlur(bgView);
                         }
@@ -2147,7 +2156,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     // according to the continuous gesture progress (shadeProgress: 0.0=Lockscreen -> 1.0=Shade)
                     float blurWeight = isHun ? 1.0f : (1.0f - shadeProgress);
                     float solidWeight = isHun ? 0.0f : shadeProgress;
-                    if (!sScreenAwake || bouncerActive) {
+                    if (!sScreenAwake || sBouncerFullyShown) {
                         blurWeight = 0f;
                         solidWeight = 0f;
                     }
@@ -2888,7 +2897,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                 sNotificationBlursCleared = true;
                 clearAllNotificationBlurs();
             }
-        } else if (newState == 1 && sScreenAwake && !sBouncerShowing) {
+        } else if (newState == 1 && sScreenAwake && !sBouncerFullyShown) {
             sKeyguardAlpha = 1.0f;
             if (sNsslView != null) {
                 sNsslView.setAlpha(1.0f);
@@ -2904,28 +2913,70 @@ public class XposedInit implements IXposedHookLoadPackage {
         sLsToShadeProgress = progress;
     }
 
+    private static boolean isBouncerInTransit() {
+        if (sStatusBarKeyguardViewManager != null) {
+            try {
+                Object res = XposedHelpers.callMethod(sStatusBarKeyguardViewManager, "isPrimaryBouncerInTransit");
+                if (res instanceof Boolean) return (Boolean) res;
+            } catch (Throwable ignored) {}
+        }
+        return false;
+    }
+
+    private static final Runnable sBouncerSettleRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (sBouncerShowing) {
+                if (sKeyguardAlpha < 0.25f || !isBouncerInTransit()) {
+                    sBouncerFullyShown = true;
+                    sNotificationBlursCleared = true;
+                    sKeyguardAlpha = 0f;
+                    if (sNsslView != null) {
+                        sNsslView.setAlpha(0f);
+                    }
+                    clearAllNotificationBlurs();
+                } else {
+                    Handler h = getMainHandler();
+                    if (h != null) {
+                        h.postDelayed(sBouncerSettleRunnable, 150);
+                    }
+                }
+            }
+        }
+    };
+
     private static void onBouncerShowingChanged(boolean showing, String reason) {
         if (sBouncerShowing == showing) return;
         sBouncerShowing = showing;
         Log.e(TAG, "onBouncerShowingChanged: " + showing + " (" + reason + ")");
         Handler h = getMainHandler();
         if (showing) {
-            sNotificationBlursCleared = true;
+            sBouncerFullyShown = false;
+            sNotificationBlursCleared = false;
             if (h != null) {
                 h.removeCallbacks(sWakeInvalidateRunnable);
+                h.removeCallbacks(sBouncerSettleRunnable);
+                h.postDelayed(sBouncerSettleRunnable, 300);
             }
-            clearAllNotificationBlurs();
-        } else if (sScreenAwake && sStatusBarState == 1) {
-            sNotificationBlursCleared = false;
-            if (sKeyguardRootView != null) {
-                float krvAlpha = sKeyguardRootView.getAlpha();
-                sKeyguardAlpha = krvAlpha;
-                if (sNsslView != null) sNsslView.setAlpha(krvAlpha);
-            } else {
-                sKeyguardAlpha = 1.0f;
-                if (sNsslView != null) sNsslView.setAlpha(1.0f);
-            }
+            // Allow smooth fade-out during gesture/transition
             invalidateNotificationStack();
+        } else {
+            sBouncerFullyShown = false;
+            sNotificationBlursCleared = false;
+            if (h != null) {
+                h.removeCallbacks(sBouncerSettleRunnable);
+            }
+            if (sScreenAwake && sStatusBarState == 1) {
+                if (sKeyguardRootView != null) {
+                    float krvAlpha = sKeyguardRootView.getAlpha();
+                    sKeyguardAlpha = (krvAlpha > 0.1f) ? krvAlpha : 1.0f;
+                    if (sNsslView != null) sNsslView.setAlpha(sKeyguardAlpha);
+                } else {
+                    sKeyguardAlpha = 1.0f;
+                    if (sNsslView != null) sNsslView.setAlpha(1.0f);
+                }
+                invalidateNotificationStack();
+            }
         }
     }
 
@@ -3056,6 +3107,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     long flags = (sGetFlagsMethod != null) ? (Long) sGetFlagsMethod.invoke(sSysUiState) : (Long) XposedHelpers.callMethod(sSysUiState, "getFlags");
                     if ((flags & 8L) != 0) {
                         sBouncerShowing = true;
+                        sBouncerFullyShown = true;
                         clearAllNotificationBlurs();
                         return;
                     }
@@ -3085,6 +3137,7 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
 
         if (sBouncerShowing) {
+            sBouncerFullyShown = true;
             clearAllNotificationBlurs();
             return;
         }
