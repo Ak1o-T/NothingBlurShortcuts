@@ -24,6 +24,7 @@ import android.view.ViewTreeObserver;
 import android.view.ViewGroup;
 import android.view.ViewParent;
 
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -212,6 +213,8 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static final int TAG_KEY_BLUR_ACTIVE = 0x7f0b9105;
     private static final int TAG_KEY_LAST_BLUR_RADIUS = 0x7f0b9106;
     private static final int TAG_KEY_BLUR_DRAWABLE = 0x7f0b9107;
+    private static final int TAG_KEY_FROSTED_DRAWABLE = 0x7f0b9108;
+    private static final int TAG_KEY_LAST_UI_MODE = 0x7f0b9109;
 
     // Cached Volume Dialog resource IDs for zero-overhead styling
     private static int sIdExpandContainer = -1;
@@ -1559,7 +1562,13 @@ public class XposedInit implements IXposedHookLoadPackage {
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                     if (param.thisObject instanceof View) {
                         View row = (View) param.thisObject;
-                        boolean hun = isRowHun(row);
+                        boolean isStarting = false;
+                        if (param.args.length > 0 && param.args[0] instanceof Boolean) {
+                            if (Boolean.TRUE.equals(param.args[0])) {
+                                isStarting = true;
+                            }
+                        }
+                        boolean hun = isStarting || isRowHun(row);
                         row.setTag(TAG_KEY_IS_HUN, hun ? Boolean.TRUE : Boolean.FALSE);
                         if (sBackgroundNormalField != null) {
                             try {
@@ -2072,8 +2081,16 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     float combinedAlpha = effectiveAlpha;
 
-                    if (!sScreenAwake || (sBouncerFullyShown && !isHun) || combinedAlpha < 0.03f) {
+                    if (!sScreenAwake || (sBouncerFullyShown && !isHun)) {
                         if (Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
+                            cleanupBlur(bgView);
+                        }
+                        param.setResult(null);
+                        return;
+                    }
+
+                    if (combinedAlpha < 0.01f) {
+                        if (!isHun && Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
                             cleanupBlur(bgView);
                         }
                         param.setResult(null);
@@ -2182,7 +2199,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     int drawBottom = clipBottom > 0 ? (actualHeight - clipBottom) : actualHeight;
 
                     if (drawRight <= drawLeft || drawBottom <= drawTop) {
-                        if (Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
+                        if (!isHun && Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
                             cleanupBlur(bgView);
                         }
                         param.setResult(null);
@@ -2892,7 +2909,8 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     /**
      * Mode 3: Floating Heads-Up Notification Card (Version 3 - Heads-Up Floating Alert)
-     * SurfaceFlinger wallpaper blur + independent alpha + 120Hz frame-synchronized motion
+     * Authentic Nothing OS FrostedBackdropDrawable (exact widget frosted glass blur & tint)
+     * Rendered directly onto the view canvas for hardware-accelerated 120Hz lag-free animation.
      */
     private static void renderHeadsUpCard(
             Canvas canvas, View bgView, View row,
@@ -2901,89 +2919,89 @@ public class XposedInit implements IXposedHookLoadPackage {
             boolean isDark, float densityF, float combinedAlpha) {
         bgView.setTag(TAG_KEY_BLUR_ACTIVE, Boolean.TRUE);
 
+        // Frame-synchronized 120Hz tracking for Heads-Up notification appearance, dismissal and gestures
+        synchronized (sHunPreDrawListeners) {
+            if (!sHunPreDrawListeners.containsKey(bgView)) {
+                ViewTreeObserver vto = bgView.getViewTreeObserver();
+                if (vto != null && vto.isAlive()) {
+                    HunPreDrawListener listener = new HunPreDrawListener(bgView, row);
+                    vto.addOnPreDrawListener(listener);
+                    sHunPreDrawListeners.put(bgView, listener);
+                }
+            }
+        }
+
         Context ctx = bgView.getContext();
-        if (ctx != null) ensureBlurReflection(ctx.getClassLoader());
-
-        // 1. Hardware RenderNode Wallpaper Blur (SurfaceFlinger)
-        Object blurDrawable = null;
-        if (sBackgroundBlurDrawableField != null) {
-            try { blurDrawable = sBackgroundBlurDrawableField.get(bgView); } catch (Throwable ignored) {}
-        }
-        if (blurDrawable == null) {
-            blurDrawable = bgView.getTag(TAG_KEY_BLUR_DRAWABLE);
-        }
-        if (blurDrawable == null) {
+        if (backdropProvider == null && providerClass != null) {
             try {
-                Object vri = (sGetViewRootImplMethod != null) ? sGetViewRootImplMethod.invoke(bgView)
-                        : XposedHelpers.callMethod(bgView, "getViewRootImpl");
-                if (vri != null) {
-                    blurDrawable = (sCreateBackgroundBlurDrawableMethod != null)
-                            ? sCreateBackgroundBlurDrawableMethod.invoke(vri)
-                            : XposedHelpers.callMethod(vri, "createBackgroundBlurDrawable");
-                    if (blurDrawable instanceof Drawable) {
-                        ((Drawable) blurDrawable).setCallback(bgView);
-                    }
-                    if (sBackgroundBlurDrawableField != null) {
-                        sBackgroundBlurDrawableField.set(bgView, blurDrawable);
-                    } else {
-                        XposedHelpers.setObjectField(bgView, "mBackgroundBlurDrawable", blurDrawable);
-                    }
-                    bgView.setTag(TAG_KEY_BLUR_DRAWABLE, blurDrawable);
-                }
+                Object companion = XposedHelpers.getStaticObjectField(providerClass, "Companion");
+                backdropProvider = XposedHelpers.callMethod(companion, "getInstance");
             } catch (Throwable ignored) {}
         }
 
-        if (blurDrawable != null) {
-            try { ((Drawable) blurDrawable).setVisible(true, false); } catch (Throwable ignored) {}
-            if (sSetColorMethod != null) {
-                try { sSetColorMethod.invoke(blurDrawable, 0); } catch (Throwable ignored) {}
-            } else {
-                try { XposedHelpers.callMethod(blurDrawable, "setColor", 0); } catch (Throwable ignored) {}
-            }
-
-            final int CONSTANT_BLUR_RADIUS = 150;
-            Integer lastRadius = (Integer) bgView.getTag(TAG_KEY_LAST_BLUR_RADIUS);
-            if (lastRadius == null || lastRadius != CONSTANT_BLUR_RADIUS) {
-                if (sSetBlurRadiusMethod != null) {
-                    try { sSetBlurRadiusMethod.invoke(blurDrawable, CONSTANT_BLUR_RADIUS); } catch (Throwable ignored) {}
-                } else {
-                    try { XposedHelpers.callMethod(blurDrawable, "setBlurRadius", CONSTANT_BLUR_RADIUS); } catch (Throwable ignored) {}
-                }
-                bgView.setTag(TAG_KEY_LAST_BLUR_RADIUS, CONSTANT_BLUR_RADIUS);
-            }
+        // Get or create FrostedBackdropDrawable for this HUN card
+        Drawable frosted = (Drawable) bgView.getTag(TAG_KEY_FROSTED_DRAWABLE);
+        if (frosted == null && backdropProvider != null && drawableClass != null && ctx != null) {
             try {
-                int blurAlpha = Math.max(0, Math.min(255, Math.round(255 * combinedAlpha)));
-                ((Drawable) blurDrawable).setAlpha(blurAlpha);
-            } catch (Throwable ignored) {}
-
-            if (sSetCornerRadiusMethod != null) {
-                try { sSetCornerRadiusMethod.invoke(blurDrawable, topRadius, topRadius, bottomRadius, bottomRadius); } catch (Throwable ignored) {}
-            } else if (sSetCornerRadiusSingleMethod != null) {
-                try { sSetCornerRadiusSingleMethod.invoke(blurDrawable, Math.max(topRadius, bottomRadius)); } catch (Throwable ignored) {}
+                frosted = (Drawable) XposedHelpers.newInstance(drawableClass, ctx, backdropProvider);
+                if (frosted != null) {
+                    frosted.setCallback(null);
+                    if (setAnimateEntranceMethod != null) {
+                        try { setAnimateEntranceMethod.invoke(frosted, false); } catch (Throwable ignored) {}
+                    }
+                    if (completeTransitionNowMethod != null) {
+                        try { completeTransitionNowMethod.invoke(frosted); } catch (Throwable ignored) {}
+                    }
+                    if (onThemeChangedMethod != null) {
+                        try { onThemeChangedMethod.invoke(frosted); } catch (Throwable ignored) {}
+                    }
+                    bgView.setTag(TAG_KEY_FROSTED_DRAWABLE, frosted);
+                }
+            } catch (Throwable t) {
+                Log.e(TAG, "Failed creating FrostedBackdropDrawable for HUN: " + t);
             }
-            Drawable bd = (Drawable) blurDrawable;
-            bd.setBounds(drawLeft, drawTop, drawRight, drawBottom);
-            bd.draw(canvas);
         }
 
-        // 2. Frosted Glass Tint & Specular Border Highlight
-        int frostedColor = isDark ? 0x60000000 : 0x85FFFFFF;
-        int baseBorderAlpha = isDark ? 0x28 : 0x38;
+        // 1. Render authentic Nothing OS frosted glass card
+        if (frosted != null) {
+            if (ctx != null) {
+                int currentUiMode = ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+                Integer lastUi = (Integer) bgView.getTag(TAG_KEY_LAST_UI_MODE);
+                if (lastUi == null || lastUi != currentUiMode) {
+                    if (onThemeChangedMethod != null) {
+                        try { onThemeChangedMethod.invoke(frosted); } catch (Throwable ignored) {}
+                    }
+                    bgView.setTag(TAG_KEY_LAST_UI_MODE, currentUiMode);
+                }
+            }
 
-        int baseTintAlpha = Color.alpha(frostedColor);
-        int animTintAlpha = Math.round(baseTintAlpha * combinedAlpha);
-        glassTintPaint.setColor((frostedColor & 0x00FFFFFF) | (animTintAlpha << 24));
+            if (setClipRadiusMethod != null) {
+                try { setClipRadiusMethod.invoke(frosted, topRadius); } catch (Throwable ignored) {}
+            }
 
-        int animBorderAlpha = Math.round(baseBorderAlpha * combinedAlpha);
-        glassBorderPaint.setColor((0x00FFFFFF) | (animBorderAlpha << 24));
-        glassBorderPaint.setStrokeWidth(1.0f * densityF);
+            int[] loc = new int[2];
+            bgView.getLocationOnScreen(loc);
+            float screenX = loc[0] + drawLeft;
+            float screenY = loc[1] + drawTop;
 
-        canvas.drawPath(clipPath, glassTintPaint);
-        canvas.restore(); // Restore clip so border is not clipped
-        canvas.drawPath(clipPath, glassBorderPaint);
-        canvas.save(); // Save again for ripple/restore
+            if (updateOffsetMethod != null) {
+                try { updateOffsetMethod.invoke(frosted, screenX, screenY); } catch (Throwable ignored) {}
+            }
 
-        // 3. Ripple effect for touch feedback on floating HUN cards
+            frosted.setBounds(drawLeft, drawTop, drawRight, drawBottom);
+            int alpha255 = Math.max(0, Math.min(255, Math.round(255 * combinedAlpha)));
+            frosted.setAlpha(alpha255);
+            frosted.draw(canvas);
+        } else {
+            // Fallback to widget frosted plate if FrostedBackdropDrawable is not yet ready
+            int frostedColor = getFrostedBackdropColor(ctx, isDark);
+            int baseTintAlpha = Color.alpha(frostedColor);
+            int animTintAlpha = Math.round(baseTintAlpha * combinedAlpha);
+            glassTintPaint.setColor((frostedColor & 0x00FFFFFF) | (animTintAlpha << 24));
+            canvas.drawPath(clipPath, glassTintPaint);
+        }
+
+        // 2. Ripple effect for touch feedback on floating HUN cards
         Drawable ripple = (Drawable) bgView.getTag(TAG_KEY_RIPPLE);
         if (ripple == null) {
             try {
@@ -3030,16 +3048,89 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     private static boolean isRowHun(View row) {
         if (row == null) return false;
+        Object tag = row.getTag(TAG_KEY_IS_HUN);
+        if (Boolean.TRUE.equals(tag)) return true;
+
         try {
-            if (sIsPinnedMethod != null && (Boolean) sIsPinnedMethod.invoke(row)) return true;
+            if (sIsHeadsUpMethod != null && Boolean.TRUE.equals(sIsHeadsUpMethod.invoke(row))) return true;
         } catch (Throwable ignored) {}
         try {
-            if (sIsPinnedAndExpandedMethod != null && (Boolean) sIsPinnedAndExpandedMethod.invoke(row)) return true;
+            if (sIsPinnedMethod != null && Boolean.TRUE.equals(sIsPinnedMethod.invoke(row))) return true;
         } catch (Throwable ignored) {}
         try {
-            if (sIsHeadsUpAnimatingAwayMethod != null && (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(row)) return true;
+            if (sIsPinnedAndExpandedMethod != null && Boolean.TRUE.equals(sIsPinnedAndExpandedMethod.invoke(row))) return true;
+        } catch (Throwable ignored) {}
+        try {
+            if (sIsHeadsUpAnimatingAwayMethod != null && Boolean.TRUE.equals(sIsHeadsUpAnimatingAwayMethod.invoke(row))) return true;
+        } catch (Throwable ignored) {}
+        try {
+            if (sIsHeadsUpStateMethod != null && Boolean.TRUE.equals(sIsHeadsUpStateMethod.invoke(row))) return true;
         } catch (Throwable ignored) {}
         return false;
+    }
+
+    private static class HunPreDrawListener implements ViewTreeObserver.OnPreDrawListener {
+        private final WeakReference<View> mBgViewRef;
+        private final WeakReference<View> mRowRef;
+        private float mLastY = Float.NaN;
+        private float mLastX = Float.NaN;
+        private float mLastAlpha = Float.NaN;
+        private float mLastScaleX = Float.NaN;
+        private float mLastScaleY = Float.NaN;
+        private int mLastActualHeight = -1;
+        private int mLastClipTop = -1;
+        private int mLastClipBottom = -1;
+
+        HunPreDrawListener(View bgView, View row) {
+            mBgViewRef = new WeakReference<>(bgView);
+            mRowRef = new WeakReference<>(row);
+        }
+
+        @Override
+        public boolean onPreDraw() {
+            View bgView = mBgViewRef.get();
+            if (bgView == null || !bgView.isAttachedToWindow()) return true;
+            View row = mRowRef.get();
+            if (row == null) {
+                ViewParent p = bgView.getParent();
+                if (p instanceof View) row = (View) p;
+            }
+            if (row != null && isRowHun(row)) {
+                float y = row.getTranslationY();
+                float x = row.getTranslationX();
+                float alpha = row.getAlpha() * bgView.getAlpha();
+                float scaleX = row.getScaleX();
+                float scaleY = row.getScaleY();
+                int h = 0;
+                if (sActualHeightField != null) {
+                    try { h = sActualHeightField.getInt(bgView); } catch (Throwable ignored) {}
+                }
+                if (h <= 0) h = bgView.getHeight();
+
+                int ct = 0;
+                if (sClipTopAmountField != null) {
+                    try { ct = sClipTopAmountField.getInt(bgView); } catch (Throwable ignored) {}
+                }
+                int cb = 0;
+                if (sClipBottomAmountField != null) {
+                    try { cb = sClipBottomAmountField.getInt(bgView); } catch (Throwable ignored) {}
+                }
+
+                if (y != mLastY || x != mLastX || alpha != mLastAlpha || scaleX != mLastScaleX || scaleY != mLastScaleY
+                        || h != mLastActualHeight || ct != mLastClipTop || cb != mLastClipBottom) {
+                    mLastY = y;
+                    mLastX = x;
+                    mLastAlpha = alpha;
+                    mLastScaleX = scaleX;
+                    mLastScaleY = scaleY;
+                    mLastActualHeight = h;
+                    mLastClipTop = ct;
+                    mLastClipBottom = cb;
+                    bgView.invalidate();
+                }
+            }
+            return true;
+        }
     }
 
     private static void onLsToShadeProgressChanged(float progress) {
