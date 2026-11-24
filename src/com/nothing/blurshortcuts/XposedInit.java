@@ -1322,6 +1322,15 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
                     }
                 });
+                XposedBridge.hookAllMethods(nsslCls, "onConfigurationChanged", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        sCachedFrostedColorDark = 0;
+                        sCachedFrostedColorLight = 0;
+                        sLastColorCacheUiMode = -1;
+                        invalidateNotificationStack();
+                    }
+                });
             } catch (Throwable ignored) {}
 
             try {
@@ -2241,12 +2250,23 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     // 1. Draw View 2 Solid Plate (when transitioning to or inside notification shade)
                     if (solidWeight > 0.01f && !isShelf) {
-                        int solidColor = resolveStockNotifColor(isDark);
-                        int baseSolidAlpha = Color.alpha(solidColor);
-                        int animSolidAlpha = Math.round(baseSolidAlpha * combinedAlpha * solidWeight);
-                        if (animSolidAlpha > 0) {
-                            solidBgPaint.setColor((solidColor & 0x00FFFFFF) | (animSolidAlpha << 24));
-                            canvas.drawPath(sClipPath, solidBgPaint);
+                        Drawable bg = null;
+                        if (sBackgroundField != null) {
+                            try { bg = (Drawable) sBackgroundField.get(bgView); } catch (Throwable ignored) {}
+                        }
+                        if (bg != null) {
+                            bg.setBounds(drawLeft, drawTop, drawRight, drawBottom);
+                            int animAlpha = Math.max(0, Math.min(255, Math.round(255 * combinedAlpha * solidWeight)));
+                            bg.setAlpha(animAlpha);
+                            bg.draw(canvas);
+                        } else {
+                            int solidColor = resolveStockNotifColor(ctx, isDark);
+                            int baseSolidAlpha = Color.alpha(solidColor);
+                            int animSolidAlpha = Math.round(baseSolidAlpha * combinedAlpha * solidWeight);
+                            if (animSolidAlpha > 0) {
+                                solidBgPaint.setColor((solidColor & 0x00FFFFFF) | (animSolidAlpha << 24));
+                                canvas.drawPath(sClipPath, solidBgPaint);
+                            }
                         }
                     }
 
@@ -2342,34 +2362,36 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
                     }
 
-                    // 3. Ripple effect for touch feedback on all notification cards
-                    Drawable ripple = (Drawable) bgView.getTag(TAG_KEY_RIPPLE);
-                    if (ripple == null) {
-                        try {
-                            Object bgObj = (sBackgroundField != null) ? sBackgroundField.get(bgView)
-                                    : XposedHelpers.getObjectField(bgView, "mBackground");
-                            if (bgObj instanceof android.graphics.drawable.LayerDrawable) {
-                                android.graphics.drawable.LayerDrawable ld = (android.graphics.drawable.LayerDrawable) bgObj;
-                                for (int i = 0; i < ld.getNumberOfLayers(); i++) {
-                                    Drawable layer = ld.getDrawable(i);
-                                    if (layer instanceof android.graphics.drawable.RippleDrawable) {
-                                        ripple = layer;
-                                        break;
+                    // 3. Ripple effect for touch feedback on lockscreen frosted glass cards
+                    if (blurWeight > 0.01f) {
+                        Drawable ripple = (Drawable) bgView.getTag(TAG_KEY_RIPPLE);
+                        if (ripple == null) {
+                            try {
+                                Object bgObj = (sBackgroundField != null) ? sBackgroundField.get(bgView)
+                                        : XposedHelpers.getObjectField(bgView, "mBackground");
+                                if (bgObj instanceof android.graphics.drawable.LayerDrawable) {
+                                    android.graphics.drawable.LayerDrawable ld = (android.graphics.drawable.LayerDrawable) bgObj;
+                                    for (int i = 0; i < ld.getNumberOfLayers(); i++) {
+                                        Drawable layer = ld.getDrawable(i);
+                                        if (layer instanceof android.graphics.drawable.RippleDrawable) {
+                                            ripple = layer;
+                                            break;
+                                        }
                                     }
+                                } else if (bgObj instanceof android.graphics.drawable.RippleDrawable) {
+                                    ripple = (Drawable) bgObj;
                                 }
-                            } else if (bgObj instanceof android.graphics.drawable.RippleDrawable) {
-                                ripple = (Drawable) bgObj;
-                            }
-                            if (ripple != null) {
-                                bgView.setTag(TAG_KEY_RIPPLE, ripple);
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-                    if (ripple != null) {
-                        try {
-                            ripple.setBounds(drawLeft, drawTop, drawRight, drawBottom);
-                            ripple.draw(canvas);
-                        } catch (Throwable ignored) {}
+                                if (ripple != null) {
+                                    bgView.setTag(TAG_KEY_RIPPLE, ripple);
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+                        if (ripple != null) {
+                            try {
+                                ripple.setBounds(drawLeft, drawTop, drawRight, drawBottom);
+                                ripple.draw(canvas);
+                            } catch (Throwable ignored) {}
+                        }
                     }
 
                     canvas.restore();
@@ -3252,16 +3274,28 @@ public class XposedInit implements IXposedHookLoadPackage {
         return color;
     }
 
-    private static int resolveStockNotifColor(boolean isDark) {
-        return isDark ? 0xFF303030 : 0xFFFCFCFC;
+    private static int resolveStockNotifColor(Context ctx, boolean isDark) {
+        if (ctx != null) {
+            try {
+                int resId = ctx.getResources().getIdentifier("notification_background_color", "color", "com.android.systemui");
+                if (resId != 0) {
+                    return ctx.getColor(resId);
+                }
+            } catch (Throwable ignored) {}
+            try {
+                int resId = isDark ? 0x01060027 : 0x0106001e;
+                return ctx.getColor(resId);
+            } catch (Throwable ignored) {}
+        }
+        return isDark ? 0xFF1C1B1B : 0xFFF3F4F1;
     }
 
     private static int resolveStockNotifColor(View bgView) {
-        if (bgView == null) return 0xFF303030;
+        if (bgView == null) return 0xFF1C1B1B;
         Context ctx = bgView.getContext();
         int uiMode = (ctx != null) ? (ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) : Configuration.UI_MODE_NIGHT_YES;
         boolean isDark = (uiMode == Configuration.UI_MODE_NIGHT_YES);
-        return resolveStockNotifColor(isDark);
+        return resolveStockNotifColor(ctx, isDark);
     }
 
     private static void cleanupBlur(View bgView) {
