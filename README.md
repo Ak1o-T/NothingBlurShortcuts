@@ -1,10 +1,11 @@
 # NothingBlurShortcuts 🪟🔒✨
 
-[![Nothing OS](https://img.shields.io/badge/Nothing%20OS-3.0%20%7C%205.0-black?style=for-the-badge&logo=android)](https://nothing.tech)
+[![Nothing OS](https://img.shields.io/badge/Nothing%20OS-5.0-black?style=for-the-badge&logo=android)](https://nothing.tech)
+[![Android](https://img.shields.io/badge/Android-17-green?style=for-the-badge&logo=android)](https://nothing.tech)
 [![LSPosed](https://img.shields.io/badge/LSPosed-Supported-5C6BC0?style=for-the-badge)](https://github.com/LSPosed/LSPosed)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue?style=for-the-badge)](LICENSE)
 
-An **Xposed / LSPosed** module for Nothing OS that brings authentic **Frosted Glass Wallpaper Blur** to the lock screen shortcut buttons, lock screen notifications (including group summaries and shelf icon collages), and floating heads-up alerts — matching official Nothing OS widgets 1:1, while preserving a clean, unblurred stock system background for the notification shade.
+An **Xposed / LSPosed** module for **Nothing OS 5.0 (Android 17)** that brings authentic **Frosted Glass Wallpaper Blur** to the lock screen shortcut buttons, lock screen notifications (including group summaries and shelf icon collages), and floating heads-up alerts — matching official Nothing OS 5.0 widgets 1:1, while preserving a clean, unblurred stock system background for the notification shade.
 
 [English](#english) | [Русский](#русский)
 
@@ -79,8 +80,8 @@ A pure Magisk or KernelSU overlay (Runtime Resource Overlay) can only modify sta
 
 ## 📱 Compatibility
 
-- Nothing OS 3.0 / 5.0 (Android 14 / Android 15+)
-- Tested on Nothing Phone (2), Nothing Phone (3) (`A024`), Nothing Phone (2a)
+- **Nothing OS 5.0 (Android 17)**
+- Tested on Nothing Phone (3) (`A024`)
 
 ---
 
@@ -171,6 +172,13 @@ Output signed APK: `bin/NothingBlurShortcuts.apk`.
 - 🛡️ **Изоляция шторки уведомлений:** Внутри раскрытого меню уведомлений отображается чистый стоковый фон без размытия.
 - 🌓 **Автоматическая смена тем:** Моментальная синхронизация с тёмной и светлой темами.
 - 🔒 **Гладкий переход к разблокировке:** Красивое угасание при переходе к окну ввода PIN-кода.
+
+---
+
+## 📱 Совместимость с устройствами
+
+- **Nothing OS 5.0 (Android 17)**
+- Протестировано на Nothing Phone (3) (`A024`)
 
 ---
 

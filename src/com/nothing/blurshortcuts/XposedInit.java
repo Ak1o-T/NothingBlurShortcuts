@@ -579,7 +579,7 @@ public class XposedInit implements IXposedHookLoadPackage {
             Log.e(TAG, "ShortcutElementProvider hook check: " + t.getMessage());
         }
 
-        // 4. Hook Volume Dialog (Android 15 / Nothing OS 5.0 volume architecture)
+        // 4. Hook Volume Dialog (Android 17 / Nothing OS 5.0 volume architecture)
         try {
             ensureBlurReflection(cl);
 
@@ -992,7 +992,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                 } catch (Throwable ignored) {}
             } catch (Throwable ignored) {}
 
-            // Android 15 PrimaryBouncerInteractor & BouncerInteractor
+            // Android 17 PrimaryBouncerInteractor & BouncerInteractor
             try {
                 Class<?> pbiCls = cl.loadClass("com.android.systemui.bouncer.domain.interactor.PrimaryBouncerInteractor");
                 XposedBridge.hookAllConstructors(pbiCls, new XC_MethodHook() {
