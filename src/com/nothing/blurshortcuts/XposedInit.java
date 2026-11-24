@@ -550,11 +550,11 @@ public class XposedInit implements IXposedHookLoadPackage {
                                     // 2. Render Widget-style frosted glass plate overlay dynamically adapted to Dark/Light theme
                                     if (isDark) {
                                         // Dark theme: translucent smoked glass overlay + subtle specular edge rim
-                                        glassTintPaint.setColor(0x36000000);
+                                        glassTintPaint.setColor(0x60000000);
                                         glassBorderPaint.setColor(0x28FFFFFF);
                                     } else {
                                         // Light theme: translucent milky white glass overlay + specular edge rim
-                                        glassTintPaint.setColor(0x32FFFFFF);
+                                        glassTintPaint.setColor(0x70FFFFFF);
                                         glassBorderPaint.setColor(0x38FFFFFF);
                                     }
 
@@ -1840,16 +1840,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                         } catch (Throwable ignored) {}
                     }
 
-                    if (sSysUiState != null) {
-                        try {
-                            long flags = (sGetFlagsMethod != null) ? (Long) sGetFlagsMethod.invoke(sSysUiState) : (Long) XposedHelpers.callMethod(sSysUiState, "getFlags");
-                            boolean bouncer = (flags & 8L) != 0;
-                            if (bouncer != sBouncerShowing) {
-                                onBouncerShowingChanged(bouncer, "notifDrawHook.liveCheck");
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-
                     if (sAmbientState != null) {
                         try {
                             if (sLStoShadeProgressField != null) sLsToShadeProgress = sLStoShadeProgressField.getFloat(sAmbientState);
@@ -1895,8 +1885,8 @@ public class XposedInit implements IXposedHookLoadPackage {
                         } catch (Throwable ignored) {}
                     }
 
-                    boolean onKeyguard = (sStatusBarState == 1) && (sLsToShadeProgress <= 0.02f) && (sFractionToShade <= 0.02f);
-                    boolean inShade = (sStatusBarState == 2) || (sLsToShadeProgress > 0.02f) || (sFractionToShade > 0.02f);
+                    boolean onKeyguard = (sStatusBarState == 1) && (sLsToShadeProgress <= 0.35f) && (sFractionToShade <= 0.35f);
+                    boolean inShade = (sStatusBarState == 2) || (sLsToShadeProgress > 0.35f) || (sFractionToShade > 0.35f);
                     if (sStatusBarStateController != null) {
                         try {
                             int st = (sStateField != null) ? sStateField.getInt(sStatusBarStateController)
@@ -1904,7 +1894,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                             if (st != sStatusBarState) {
                                 sStatusBarState = st;
                                 if (st == 1) {
-                                    onKeyguard = (sLsToShadeProgress <= 0.02f) && (sFractionToShade <= 0.02f);
+                                    onKeyguard = (sLsToShadeProgress <= 0.35f) && (sFractionToShade <= 0.35f);
                                     inShade = !onKeyguard;
                                 } else {
                                     onKeyguard = false;
@@ -2103,18 +2093,17 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     // Target determination (Two-View Notification Architecture):
                     // View 1 - Frosted Glass Blur Mode applies to:
-                    //   - All notification cards on resting lockscreen (onKeyguard)
-                    //   - Collapsed shelf collage capsule on lockscreen (isShelf && onKeyguard)
+                    //   - All notification cards on resting lockscreen (sStatusBarState == 1)
+                    //   - Collapsed shelf collage capsule on lockscreen (isShelf && sStatusBarState == 1)
                     //   - Heads-Up floating banner alerts over apps (isHun && !inShade)
                     // View 2 - Classic Solid Stock System Background Mode applies to:
                     //   - All notifications in Notification Shade menu (inShade == true)
                     //   - Bouncer PIN/password screen (when fully visible)
-                    //   - Colorized media player with album art
                     boolean isTarget = false;
-                    if (sScreenAwake && !bouncerFullyVisible && !isColorized) {
+                    if (sScreenAwake && !bouncerFullyVisible) {
                         if (isHun) {
                             isTarget = true;
-                        } else if (onKeyguard && !inShade) {
+                        } else if (sStatusBarState == 1) {
                             isTarget = true;
                         }
                     }
@@ -2340,7 +2329,9 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                         // 2. Frosted Glass Tint & Specular Border Highlight (Dynamic Dark & Light Theme)
                         // Harmonized, uniform frosted glass tone across all notifications and the shelf collage
-                        int frostedColor = isDark ? 0x36000000 : 0x32FFFFFF;
+                        int frostedColor = isDark
+                                ? (isShelf ? 0x68000000 : 0x60000000)
+                                : (isShelf ? 0x88FFFFFF : 0x70FFFFFF);
                         int baseBorderAlpha = isDark ? 0x28 : 0x38;
 
                         int baseTintAlpha = Color.alpha(frostedColor);
@@ -2357,16 +2348,18 @@ public class XposedInit implements IXposedHookLoadPackage {
                         canvas.drawPath(sClipPath, glassBorderPaint);
                         canvas.save(); // Save again for ripple/restore
                     } else {
-                        // View 2: Classic Stock System Background Mode (Notification Shade Menu)
+                        // View 2: Classic Stock System Background Mode (Notification Shade Menu ONLY)
                         // Turn off hardware blur once when switching modes so SurfaceFlinger punches no hole
                         if (Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
                             cleanupBlur(bgView);
                         }
 
-                        // Draw authentic uniform solid system plate
-                        int solidColor = resolveStockNotifColor(bgView);
-                        solidBgPaint.setColor(solidColor);
-                        canvas.drawPath(sClipPath, solidBgPaint);
+                        // Draw authentic uniform solid system plate ONLY in notification shade
+                        if (inShade || sStatusBarState == 0 || sStatusBarState == 2) {
+                            int solidColor = resolveStockNotifColor(bgView);
+                            solidBgPaint.setColor(solidColor);
+                            canvas.drawPath(sClipPath, solidBgPaint);
+                        }
                     }
 
                     // 3. Ripple effect for touch feedback on all notification cards
@@ -2872,10 +2865,14 @@ public class XposedInit implements IXposedHookLoadPackage {
             // Transition is in progress; allow notifications and blurs to fade smoothly with KeyguardRootView alpha
             invalidateNotificationStack();
         } else if (sScreenAwake && sStatusBarState == 1) {
-            sKeyguardAlpha = 1.0f;
             sNotificationBlursCleared = false;
-            if (sNsslView != null) {
-                sNsslView.setAlpha(1.0f);
+            if (sKeyguardRootView != null) {
+                float krvAlpha = sKeyguardRootView.getAlpha();
+                sKeyguardAlpha = krvAlpha;
+                if (sNsslView != null) sNsslView.setAlpha(krvAlpha);
+            } else {
+                sKeyguardAlpha = 1.0f;
+                if (sNsslView != null) sNsslView.setAlpha(1.0f);
             }
             invalidateNotificationStack();
         }
@@ -3057,9 +3054,6 @@ public class XposedInit implements IXposedHookLoadPackage {
         Handler h = getMainHandler();
         if (h != null) {
             h.removeCallbacks(sWakeInvalidateRunnable);
-            h.postDelayed(sWakeInvalidateRunnable, 50);
-            h.postDelayed(sWakeInvalidateRunnable, 150);
-            h.postDelayed(sWakeInvalidateRunnable, 300);
         }
     }
 
@@ -3123,10 +3117,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     : XposedHelpers.getObjectField(bgView, "mBackgroundBlurDrawable");
             if (bd instanceof Drawable) {
                 Drawable d = (Drawable) bd;
-                if (d.isVisible()) {
-                    d.setAlpha(0);
-                    d.setVisible(false, false);
-                }
+                d.setAlpha(0);
             }
         } catch (Throwable ignored) {}
         bgView.setTag(TAG_KEY_BLUR_ACTIVE, Boolean.FALSE);
