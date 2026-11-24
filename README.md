@@ -3,6 +3,7 @@
 [![Nothing OS](https://img.shields.io/badge/Nothing%20OS-5.0-black?style=for-the-badge&logo=android)](https://nothing.tech)
 [![Android](https://img.shields.io/badge/Android-17-green?style=for-the-badge&logo=android)](https://nothing.tech)
 [![LSPosed](https://img.shields.io/badge/LSPosed-Supported-5C6BC0?style=for-the-badge)](https://github.com/LSPosed/LSPosed)
+[![GitHub Downloads](https://img.shields.io/github/downloads/Ak1o-T/NothingBlurShortcuts/total?style=for-the-badge)](https://github.com/Ak1o-T/NothingBlurShortcuts/releases/latest)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue?style=for-the-badge)](LICENSE)
 
 An **Xposed / LSPosed** module for **Nothing OS 5.0 (Android 17)** that brings authentic **Frosted Glass Wallpaper Blur** to the lock screen shortcut buttons, lock screen notifications (including group summaries and shelf icon collages), and floating heads-up alerts — matching official Nothing OS 5.0 widgets 1:1, while preserving a clean, unblurred stock system background for the notification shade.
