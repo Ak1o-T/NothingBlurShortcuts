@@ -217,6 +217,7 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static int sIdCaptions = -1;
     private static int sIdA11y = -1;
     private static int sIdAssistant = -1;
+    private static int sIdBackgroundDimmed = -1;
 
     // Cached Compose native canvas reflection
     private static Method sComposeGetInternalCanvasMethod = null;
@@ -1866,23 +1867,72 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
                     }
 
+
+                    Context ctx = bgView.getContext();
+                    if (ctx == null) return;
+
                     String bgCls = bgView.getClass().getName();
                     boolean isShelf = bgCls.contains("Shelf")
                             || (row != null && row.getClass().getName().contains("Shelf"))
                             || (shelfCls != null && row != null && shelfCls.isAssignableFrom(row.getClass()));
 
                     // Only mBackgroundNormal should ever draw notification card backgrounds.
-                    // mBackgroundDimmed must NEVER draw because it stays at collapsed height and causes double borders.
-                    if (row != null && !isShelf) {
-                        try {
-                            Object normalBg = (sBackgroundNormalField != null) ? sBackgroundNormalField.get(row)
-                                    : XposedHelpers.getObjectField(row, "mBackgroundNormal");
-                            if (normalBg != null && bgView != normalBg) {
-                                cleanupBlur(bgView);
-                                param.setResult(null);
-                                return;
+                    // mBackgroundDimmed must NEVER draw because it causes stacked darker layers.
+                    // Child rows inside NotificationChildrenContainer must NEVER draw their own backgrounds;
+                    // the top-level parent summary row already draws the unified card background for the whole group.
+                    if (!isShelf) {
+                        if (sIdBackgroundDimmed <= 0 && ctx.getResources() != null) {
+                            try {
+                                sIdBackgroundDimmed = ctx.getResources().getIdentifier("backgroundDimmed", "id", "com.android.systemui");
+                            } catch (Throwable ignored) {}
+                        }
+                        if (sIdBackgroundDimmed > 0 && bgView.getId() == sIdBackgroundDimmed) {
+                            cleanupBlur(bgView);
+                            param.setResult(null);
+                            return;
+                        }
+
+                        boolean isChildOfGroup = false;
+                        ViewParent pWalker = (row != null) ? row.getParent() : bgView.getParent();
+                        while (pWalker != null) {
+                            String pName = pWalker.getClass().getName();
+                            if (pName.contains("NotificationChildrenContainer")) {
+                                isChildOfGroup = true;
+                                break;
                             }
-                        } catch (Throwable ignored) {}
+                            pWalker = pWalker.getParent();
+                        }
+                        if (isChildOfGroup) {
+                            cleanupBlur(bgView);
+                            param.setResult(null);
+                            return;
+                        }
+
+                        if (row != null) {
+                            try {
+                                boolean isChild = false;
+                                if (sIsChildInGroupMethod != null) {
+                                    isChild = (Boolean) sIsChildInGroupMethod.invoke(row);
+                                } else {
+                                    isChild = (Boolean) XposedHelpers.callMethod(row, "isChildInGroup");
+                                }
+                                if (isChild) {
+                                    cleanupBlur(bgView);
+                                    param.setResult(null);
+                                    return;
+                                }
+                            } catch (Throwable ignored) {}
+
+                            try {
+                                Object normalBg = (sBackgroundNormalField != null) ? sBackgroundNormalField.get(row)
+                                        : XposedHelpers.getObjectField(row, "mBackgroundNormal");
+                                if (normalBg == null || bgView != normalBg) {
+                                    cleanupBlur(bgView);
+                                    param.setResult(null);
+                                    return;
+                                }
+                            } catch (Throwable ignored) {}
+                        }
                     }
 
                     boolean onKeyguard = (sStatusBarState == 1) && (sLsToShadeProgress <= 0.35f) && (sFractionToShade <= 0.35f);
@@ -2111,8 +2161,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                     Canvas canvas = (Canvas) param.args[0];
                     if (canvas == null) return;
 
-                    Context ctx = bgView.getContext();
-                    if (ctx == null) return;
 
                     int uiMode = ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
                     boolean isDark = (uiMode == Configuration.UI_MODE_NIGHT_YES);
