@@ -215,6 +215,9 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static final int TAG_KEY_BLUR_DRAWABLE = 0x7f0b9107;
     private static final int TAG_KEY_FROSTED_DRAWABLE = 0x7f0b9108;
     private static final int TAG_KEY_LAST_UI_MODE = 0x7f0b9109;
+    private static final int TAG_KEY_HUN_VELOCITY_Y = 0x7f0b910a;
+    private static final int TAG_KEY_HUN_VELOCITY_X = 0x7f0b910b;
+    private static final int TAG_KEY_ROW_BG = 0x7f0b910c;
 
     // Cached Volume Dialog resource IDs for zero-overhead styling
     private static int sIdExpandContainer = -1;
@@ -1502,6 +1505,21 @@ public class XposedInit implements IXposedHookLoadPackage {
             try { sBackgroundNormalField = notifRowClass.getDeclaredField("mBackgroundNormal"); sBackgroundNormalField.setAccessible(true); } catch (Throwable ignored) {}
             try { sBackgroundDimmedField = notifRowClass.getDeclaredField("mBackgroundDimmed"); sBackgroundDimmedField.setAccessible(true); } catch (Throwable ignored) {}
 
+            XC_MethodHook rowTranslationHook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    View row = (View) param.thisObject;
+                    if (row != null && isRowHun(row)) {
+                        Object bg = row.getTag(TAG_KEY_ROW_BG);
+                        if (bg instanceof View) {
+                            ((View) bg).invalidate();
+                        }
+                    }
+                }
+            };
+            try { XposedBridge.hookAllMethods(notifRowClass, "setTranslationY", rowTranslationHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(notifRowClass, "setTranslationX", rowTranslationHook); } catch (Throwable ignored) {}
+
             if (shelfCls != null) {
                 try { sShelfActualWidthField = shelfCls.getDeclaredField("mActualWidth"); sShelfActualWidthField.setAccessible(true); } catch (Throwable ignored) {}
             }
@@ -2006,6 +2024,10 @@ public class XposedInit implements IXposedHookLoadPackage {
                                 }
                             } catch (Throwable ignored) {}
                         }
+                    }
+
+                    if (row != null) {
+                        row.setTag(TAG_KEY_ROW_BG, bgView);
                     }
 
                     // 1. Version 3: Floating Heads-Up Notification (HUN)
@@ -2897,9 +2919,9 @@ public class XposedInit implements IXposedHookLoadPackage {
     }
 
     /**
-     * Mode 3: Floating Heads-Up Notification Card (Option 2 - Lucent Translucent Glass)
-     * Authentic Nothing OS translucent Lucent glass plate with specular highlight border.
-     * Rendered directly onto the view canvas for zero-lag 120Hz butter-smooth animation.
+     * Mode 3: Floating Heads-Up Notification Card (Option 1 - Predictive Dynamic Blur)
+     * SurfaceFlinger BackgroundBlurDrawable with 1-VSYNC velocity prediction compensation
+     * combined with authentic Nothing OS frosted Lucent tint and specular border highlight.
      */
     private static void renderHeadsUpCard(
             Canvas canvas, View bgView, View row,
@@ -2907,16 +2929,6 @@ public class XposedInit implements IXposedHookLoadPackage {
             float topRadius, float bottomRadius, Path clipPath,
             boolean isDark, float densityF, float combinedAlpha) {
         bgView.setTag(TAG_KEY_BLUR_ACTIVE, Boolean.TRUE);
-
-        // Ensure any previous SurfaceFlinger blur drawable is muted to eliminate animation lag
-        Object bbd = bgView.getTag(TAG_KEY_BLUR_DRAWABLE);
-        if (bbd instanceof Drawable) {
-            try {
-                Drawable d = (Drawable) bbd;
-                d.setAlpha(0);
-                d.setVisible(false, false);
-            } catch (Throwable ignored) {}
-        }
 
         // Frame-synchronized 120Hz tracking for Heads-Up notification appearance, dismissal and gestures
         synchronized (sHunPreDrawListeners) {
@@ -2931,18 +2943,79 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
 
         Context ctx = bgView.getContext();
+        ensureBlurReflection(ctx != null ? ctx.getClassLoader() : null);
 
-        // 1. Translucent frosted glass plate (shows underlying running app content with high contrast)
-        // Dark: ~80% solid dark plate, Light: ~85% solid light plate
-        int basePlateColor = isDark ? 0xCC1E1E1E : 0xDCF4F4F2;
-        int baseAlpha = Color.alpha(basePlateColor);
-        int animBaseAlpha = Math.round(baseAlpha * combinedAlpha);
-        if (animBaseAlpha > 0) {
-            solidBgPaint.setColor((basePlateColor & 0x00FFFFFF) | (animBaseAlpha << 24));
-            canvas.drawPath(clipPath, solidBgPaint);
+        // 1. Get or create BackgroundBlurDrawable for live window background blur (SurfaceFlinger)
+        Drawable blurDrawable = (Drawable) bgView.getTag(TAG_KEY_BLUR_DRAWABLE);
+        if (blurDrawable == null && sCreateBackgroundBlurDrawableMethod != null) {
+            Object vri = null;
+            if (sGetViewRootImplMethod != null) {
+                try { vri = sGetViewRootImplMethod.invoke(bgView); } catch (Throwable ignored) {}
+            }
+            if (vri == null && bgView.getRootView() != null && sGetViewRootImplMethod != null) {
+                try { vri = sGetViewRootImplMethod.invoke(bgView.getRootView()); } catch (Throwable ignored) {}
+            }
+            if (vri == null && row != null && sGetViewRootImplMethod != null) {
+                try { vri = sGetViewRootImplMethod.invoke(row); } catch (Throwable ignored) {}
+            }
+            if (vri != null) {
+                try {
+                    Object created = sCreateBackgroundBlurDrawableMethod.invoke(vri);
+                    if (created instanceof Drawable) {
+                        blurDrawable = (Drawable) created;
+                        bgView.setTag(TAG_KEY_BLUR_DRAWABLE, blurDrawable);
+                    }
+                } catch (Throwable t) {
+                    Log.e(TAG, "Failed creating BackgroundBlurDrawable for HUN: " + t);
+                }
+            }
         }
 
-        // 2. Authentic Nothing OS Lucent frosted tint highlight overlay
+        // 2. Velocity-predicted bounds compensation to cancel out SurfaceFlinger's 1-VSYNC latency
+        float vy = 0f;
+        Object tagVy = bgView.getTag(TAG_KEY_HUN_VELOCITY_Y);
+        if (tagVy instanceof Float) vy = (Float) tagVy;
+
+        float vx = 0f;
+        Object tagVx = bgView.getTag(TAG_KEY_HUN_VELOCITY_X);
+        if (tagVx instanceof Float) vx = (Float) tagVx;
+
+        // Predictive lead shift: SurfaceFlinger applies blur on the next VSYNC frame,
+        // so we tell SurfaceFlinger where the moving view will be on that next frame!
+        int leadY = Math.max(-150, Math.min(150, Math.round(vy * 1.15f)));
+        int leadX = Math.max(-150, Math.min(150, Math.round(vx * 1.15f)));
+
+        int blurLeft = drawLeft + leadX;
+        int blurTop = drawTop + leadY;
+        int blurRight = drawRight + leadX;
+        int blurBottom = drawBottom + leadY;
+
+        // 3. Draw live window background blur
+        int alpha255 = Math.max(0, Math.min(255, Math.round(255 * combinedAlpha)));
+        if (blurDrawable != null) {
+            int blurRadius = Math.round(26.0f * densityF);
+            if (sSetBlurRadiusMethod != null) {
+                try { sSetBlurRadiusMethod.invoke(blurDrawable, blurRadius); } catch (Throwable ignored) {}
+            }
+            if (sSetCornerRadiusMethod != null) {
+                try {
+                    sSetCornerRadiusMethod.invoke(blurDrawable, topRadius, topRadius, bottomRadius, bottomRadius);
+                } catch (Throwable ignored) {
+                    if (sSetCornerRadiusSingleMethod != null) {
+                        try { sSetCornerRadiusSingleMethod.invoke(blurDrawable, topRadius); } catch (Throwable ignored2) {}
+                    }
+                }
+            } else if (sSetCornerRadiusSingleMethod != null) {
+                try { sSetCornerRadiusSingleMethod.invoke(blurDrawable, topRadius); } catch (Throwable ignored) {}
+            }
+
+            blurDrawable.setBounds(blurLeft, blurTop, blurRight, blurBottom);
+            blurDrawable.setAlpha(alpha255);
+            blurDrawable.setVisible(alpha255 > 0, false);
+            blurDrawable.draw(canvas);
+        }
+
+        // 4. Render authentic Nothing OS translucent Lucent frosted tint over the blur
         int frostedColor = getFrostedBackdropColor(ctx, isDark);
         int baseTintAlpha = Color.alpha(frostedColor);
         int animTintAlpha = Math.round(baseTintAlpha * combinedAlpha);
@@ -2951,7 +3024,7 @@ public class XposedInit implements IXposedHookLoadPackage {
             canvas.drawPath(clipPath, glassTintPaint);
         }
 
-        // 3. Crisp specular glass border highlight (Nothing OS design signature)
+        // 5. Crisp specular glass border highlight (Nothing OS design signature)
         int borderColor = isDark ? 0x2EFFFFFF : 0x30FFFFFF;
         int borderAlpha = Math.round(Color.alpha(borderColor) * combinedAlpha);
         if (borderAlpha > 0) {
@@ -2960,7 +3033,7 @@ public class XposedInit implements IXposedHookLoadPackage {
             canvas.drawPath(clipPath, glassBorderPaint);
         }
 
-        // 4. Ripple effect for touch feedback on floating HUN cards
+        // 6. Ripple effect for touch feedback on floating HUN cards
         Drawable ripple = (Drawable) bgView.getTag(TAG_KEY_RIPPLE);
         if (ripple == null) {
             try {
@@ -3068,6 +3141,10 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                 if (y != mLastY || x != mLastX || alpha != mLastAlpha || scaleX != mLastScaleX || scaleY != mLastScaleY
                         || h != mLastActualHeight || ct != mLastClipTop || cb != mLastClipBottom) {
+                    float vy = !Float.isNaN(mLastY) ? (y - mLastY) : 0f;
+                    float vx = !Float.isNaN(mLastX) ? (x - mLastX) : 0f;
+                    bgView.setTag(TAG_KEY_HUN_VELOCITY_Y, vy);
+                    bgView.setTag(TAG_KEY_HUN_VELOCITY_X, vx);
                     mLastY = y;
                     mLastX = x;
                     mLastAlpha = alpha;
@@ -3077,6 +3154,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                     mLastClipTop = ct;
                     mLastClipBottom = cb;
                     bgView.invalidate();
+                } else {
+                    bgView.setTag(TAG_KEY_HUN_VELOCITY_Y, 0f);
+                    bgView.setTag(TAG_KEY_HUN_VELOCITY_X, 0f);
                 }
             }
             return true;
