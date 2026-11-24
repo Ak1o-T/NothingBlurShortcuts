@@ -1110,6 +1110,65 @@ public class XposedInit implements IXposedHookLoadPackage {
                 } catch (Throwable ignored) {}
             } catch (Throwable ignored) {}
 
+            // 1:1 Synchronized Fade-Out for Bouncer Transitions (matching widgets & bottom buttons)
+            XC_MethodHook progressHook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    Object res = param.getResult();
+                    if (res instanceof Float) {
+                        float progress = (Float) res;
+                        Object from = extractContent(param.thisObject, "fromContent");
+                        Object to = extractContent(param.thisObject, "toContent");
+                        if (from == null) from = extractContent(param.thisObject, "fromOrToScene");
+                        if (to == null) to = extractContent(param.thisObject, "overlay");
+                        handleBouncerTransitionProgress(from, to, progress, param.thisObject.getClass().getSimpleName());
+                    }
+                }
+            };
+
+            for (String clsName : new String[] {
+                    "com.android.compose.animation.scene.SwipeAnimation",
+                    "com.android.compose.animation.scene.ShowOrHideOverlaySwipeTransition",
+                    "com.android.compose.animation.scene.ChangeSceneSwipeTransition",
+                    "com.android.compose.animation.scene.OneOffShowOrHideOverlayTransition",
+                    "com.android.compose.animation.scene.OneOffSceneTransition",
+                    "com.android.compose.animation.scene.DelegatingTransition$ShowOrHideOverlay"
+            }) {
+                try {
+                    Class<?> c = cl.loadClass(clsName);
+                    if (c != null) {
+                        XposedBridge.hookAllMethods(c, "getProgress", progressHook);
+                        if (clsName.contains("SwipeAnimation")) {
+                            XposedBridge.hookAllMethods(c, "computeProgress", progressHook);
+                        }
+                    }
+                } catch (Throwable t) {
+                    Log.e(TAG, "Failed to hook getProgress on " + clsName + ": " + t);
+                }
+            }
+
+            try {
+                Class<?> ktrCls = cl.loadClass("com.android.systemui.keyguard.data.repository.KeyguardTransitionRepositoryImpl");
+                if (ktrCls != null) {
+                    XposedBridge.hookAllMethods(ktrCls, "emitTransition", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            if (param.args.length > 0 && param.args[0] != null) {
+                                Object step = param.args[0];
+                                try {
+                                    Object from = XposedHelpers.callMethod(step, "getFrom");
+                                    Object to = XposedHelpers.callMethod(step, "getTo");
+                                    Object valObj = XposedHelpers.callMethod(step, "getValue");
+                                    if (valObj instanceof Float) {
+                                        handleBouncerTransitionProgress(from, to, (Float) valObj);
+                                    }
+                                } catch (Throwable ignored) {}
+                            }
+                        }
+                    });
+                }
+            } catch (Throwable ignored) {}
+
             // Track Status Bar State via StatusBarStateControllerImpl
             try {
                 Class<?> sscCls = cl.loadClass("com.android.systemui.statusbar.StatusBarStateControllerImpl");
@@ -2923,11 +2982,127 @@ public class XposedInit implements IXposedHookLoadPackage {
         return false;
     }
 
+    private static float evaluateCubicBezier(float x1, float y1, float x2, float y2, float t) {
+        if (t <= 0f) return 0f;
+        if (t >= 1f) return 1f;
+        float u = t;
+        for (int i = 0; i < 8; i++) {
+            float oneMinusU = 1.0f - u;
+            float u2 = u * u;
+            float curX = 3.0f * oneMinusU * oneMinusU * u * x1 + 3.0f * oneMinusU * u2 * x2 + u * u2;
+            float dx = 3.0f * oneMinusU * oneMinusU * x1 + 6.0f * oneMinusU * u * (x2 - x1) + 3.0f * u2 * (1.0f - x2);
+            if (Math.abs(curX - t) < 1e-5f || Math.abs(dx) < 1e-6f) break;
+            u -= (curX - t) / dx;
+            if (u < 0.0f) { u = 0.0f; break; }
+            if (u > 1.0f) { u = 1.0f; break; }
+        }
+        float oneMinusU = 1.0f - u;
+        float u2 = u * u;
+        return 3.0f * oneMinusU * oneMinusU * u * y1 + 3.0f * oneMinusU * u2 * y2 + u * u2;
+    }
+
+    // Exact easing curve used by Compose LockscreenElementKeys.Region.Lower (bottom buttons),
+    // Region.Upper (widgets & clock), and Notifications.Stack:
+    // fractionRange(to = 0.3f, easing = Easings.PredictiveBack = CubicBezierEasing(0.1f, 0.1f, 0.0f, 1.0f))
+    private static float evaluatePredictiveBack(float fraction) {
+        return evaluateCubicBezier(0.1f, 0.1f, 0.0f, 1.0f, fraction);
+    }
+
+    private static String contentToString(Object obj) {
+        if (obj == null) return "";
+        try {
+            Object dbg = XposedHelpers.callMethod(obj, "getDebugName");
+            if (dbg != null) return dbg.toString().toLowerCase();
+        } catch (Throwable ignored) {}
+        return obj.toString().toLowerCase();
+    }
+
+    private static Object extractContent(Object target, String fieldName) {
+        if (target == null) return null;
+        try {
+            return XposedHelpers.getObjectField(target, fieldName);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static void applyKeyguardAlpha(final float alpha, final boolean isBouncerToLs) {
+        if (Math.abs(sKeyguardAlpha - alpha) < 0.003f) return;
+        sKeyguardAlpha = alpha;
+
+        Runnable r = new Runnable() {
+            @Override
+            public void run() {
+                if (sNsslView != null) {
+                    sNsslView.setAlpha(alpha);
+                }
+                if (alpha <= 0.01f) {
+                    sBouncerShowing = true;
+                    sBouncerFullyShown = true;
+                    if (!sNotificationBlursCleared) {
+                        sNotificationBlursCleared = true;
+                        clearAllNotificationBlurs();
+                    }
+                } else {
+                    sBouncerFullyShown = false;
+                    sNotificationBlursCleared = false;
+                    if (alpha >= 0.99f) {
+                        sBouncerShowing = false;
+                    }
+                    invalidateNotificationStack();
+                }
+            }
+        };
+
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            r.run();
+        } else {
+            Handler h = getMainHandler();
+            if (h != null) h.post(r);
+        }
+    }
+
+    private static void handleBouncerTransitionProgress(Object fromObj, Object toObj, float progress, String caller) {
+        if (fromObj == null && toObj == null) return;
+        String from = contentToString(fromObj);
+        String to = contentToString(toObj);
+
+        boolean isLsToBouncer = (from.contains("lockscreen") && to.contains("bouncer"));
+        boolean isBouncerToLs = (from.contains("bouncer") && to.contains("lockscreen"));
+
+        if (!isLsToBouncer && !isBouncerToLs) {
+            return;
+        }
+
+        float rawProgress = Math.max(0.0f, Math.min(1.0f, progress));
+        float alpha;
+        if (isLsToBouncer) {
+            // Lockscreen -> Bouncer:
+            // 1:1 match with Compose widgets & bottom buttons:
+            // fractionRange(to = 0.3f, easing = Easings.PredictiveBack)
+            float fraction = Math.min(1.0f, rawProgress / 0.3f);
+            float eased = evaluatePredictiveBack(fraction);
+            alpha = Math.max(0.0f, Math.min(1.0f, 1.0f - eased));
+        } else {
+            // Bouncer -> Lockscreen:
+            float distToLockscreen = 1.0f - rawProgress;
+            float fraction = Math.min(1.0f, distToLockscreen / 0.3f);
+            float eased = evaluatePredictiveBack(fraction);
+            alpha = Math.max(0.0f, Math.min(1.0f, 1.0f - eased));
+        }
+
+        applyKeyguardAlpha(alpha, isBouncerToLs);
+    }
+
+    private static void handleBouncerTransitionProgress(Object fromObj, Object toObj, float progress) {
+        handleBouncerTransitionProgress(fromObj, toObj, progress, "default");
+    }
+
     private static final Runnable sBouncerSettleRunnable = new Runnable() {
         @Override
         public void run() {
             if (sBouncerShowing) {
-                if (sKeyguardAlpha < 0.25f || !isBouncerInTransit()) {
+                if (sKeyguardAlpha < 0.05f) {
                     sBouncerFullyShown = true;
                     sNotificationBlursCleared = true;
                     sKeyguardAlpha = 0f;
@@ -2935,6 +3110,17 @@ public class XposedInit implements IXposedHookLoadPackage {
                         sNsslView.setAlpha(0f);
                     }
                     clearAllNotificationBlurs();
+                } else if (!isBouncerInTransit()) {
+                    // Still in bouncer mode but alpha hasn't zeroed out and transition ended
+                    if (sKeyguardAlpha < 0.25f) {
+                        sBouncerFullyShown = true;
+                        sNotificationBlursCleared = true;
+                        sKeyguardAlpha = 0f;
+                        if (sNsslView != null) {
+                            sNsslView.setAlpha(0f);
+                        }
+                        clearAllNotificationBlurs();
+                    }
                 } else {
                     Handler h = getMainHandler();
                     if (h != null) {
