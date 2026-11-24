@@ -1877,9 +1877,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                             || (shelfCls != null && row != null && shelfCls.isAssignableFrom(row.getClass()));
 
                     // Only mBackgroundNormal should ever draw notification card backgrounds.
-                    // mBackgroundDimmed must NEVER draw because it causes stacked darker layers.
-                    // Child rows inside NotificationChildrenContainer must NEVER draw their own backgrounds;
-                    // the top-level parent summary row already draws the unified card background for the whole group.
+                    // mBackgroundDimmed must NEVER draw on parent/single rows because it causes stacked darker layers.
+                    // When a group is collapsed, child rows inside NotificationChildrenContainer must NEVER draw.
+                    // When a group is expanded, each child row MUST draw its own background card!
                     if (!isShelf) {
                         int bgId = bgView.getId();
                         String bgResName = null;
@@ -1887,16 +1887,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                             try {
                                 bgResName = ctx.getResources().getResourceEntryName(bgId);
                             } catch (Throwable ignored) {}
-                        }
-                        if ("backgroundDimmed".equals(bgResName)) {
-                            cleanupBlur(bgView);
-                            param.setResult(null);
-                            return;
-                        }
-                        if (bgResName != null && !"backgroundNormal".equals(bgResName)) {
-                            cleanupBlur(bgView);
-                            param.setResult(null);
-                            return;
                         }
 
                         boolean isChildOfGroup = false;
@@ -1921,27 +1911,77 @@ public class XposedInit implements IXposedHookLoadPackage {
                             }
                             pWalker = pWalker.getParent();
                         }
+
+                        if (!isChildOfGroup && row != null) {
+                            try {
+                                if (sIsChildInGroupMethod != null) {
+                                    isChildOfGroup = (Boolean) sIsChildInGroupMethod.invoke(row);
+                                } else {
+                                    isChildOfGroup = (Boolean) XposedHelpers.callMethod(row, "isChildInGroup");
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+
                         if (isChildOfGroup) {
-                            cleanupBlur(bgView);
-                            param.setResult(null);
-                            return;
+                            boolean groupExpanded = false;
+                            if (row != null) {
+                                try {
+                                    if (sIsGroupExpandedMethod != null) {
+                                        groupExpanded = (Boolean) sIsGroupExpandedMethod.invoke(row);
+                                    } else {
+                                        groupExpanded = (Boolean) XposedHelpers.callMethod(row, "isGroupExpanded");
+                                    }
+                                } catch (Throwable ignored) {}
+                                if (!groupExpanded) {
+                                    try {
+                                        Object parentRow = XposedHelpers.getObjectField(row, "mNotificationParent");
+                                        if (parentRow != null) {
+                                            if (sIsGroupExpandedMethod != null) {
+                                                groupExpanded = (Boolean) sIsGroupExpandedMethod.invoke(parentRow);
+                                            } else {
+                                                groupExpanded = (Boolean) XposedHelpers.callMethod(parentRow, "isGroupExpanded");
+                                            }
+                                        }
+                                    } catch (Throwable ignored) {}
+                                }
+                            }
+                            if (!groupExpanded) {
+                                ViewParent vp = (row != null) ? row.getParent() : bgView.getParent();
+                                while (vp != null) {
+                                    if (vp.getClass().getName().contains("ChildrenContainer")) {
+                                        try {
+                                            Object contNotif = XposedHelpers.getObjectField(vp, "mContainingNotification");
+                                            if (contNotif != null) {
+                                                if (sIsGroupExpandedMethod != null) {
+                                                    groupExpanded = (Boolean) sIsGroupExpandedMethod.invoke(contNotif);
+                                                } else {
+                                                    groupExpanded = (Boolean) XposedHelpers.callMethod(contNotif, "isGroupExpanded");
+                                                }
+                                            }
+                                        } catch (Throwable ignored) {}
+                                        break;
+                                    }
+                                    vp = vp.getParent();
+                                }
+                            }
+
+                            // When group is collapsed, child rows MUST NOT draw (prevents stacked darker layers).
+                            // When group is expanded, child rows MUST draw their individual card backgrounds!
+                            if (!groupExpanded) {
+                                cleanupBlur(bgView);
+                                param.setResult(null);
+                                return;
+                            }
+                        } else {
+                            // On parent summary rows and single rows, backgroundDimmed must NEVER draw
+                            if ("backgroundDimmed".equals(bgResName)) {
+                                cleanupBlur(bgView);
+                                param.setResult(null);
+                                return;
+                            }
                         }
 
                         if (row != null) {
-                            try {
-                                boolean isChild = false;
-                                if (sIsChildInGroupMethod != null) {
-                                    isChild = (Boolean) sIsChildInGroupMethod.invoke(row);
-                                } else {
-                                    isChild = (Boolean) XposedHelpers.callMethod(row, "isChildInGroup");
-                                }
-                                if (isChild) {
-                                    cleanupBlur(bgView);
-                                    param.setResult(null);
-                                    return;
-                                }
-                            } catch (Throwable ignored) {}
-
                             try {
                                 Object normalBg = (sBackgroundNormalField != null) ? sBackgroundNormalField.get(row)
                                         : XposedHelpers.getObjectField(row, "mBackgroundNormal");
