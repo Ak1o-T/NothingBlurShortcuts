@@ -2747,7 +2747,8 @@ public class XposedInit implements IXposedHookLoadPackage {
 
     /**
      * Mode 1: Lockscreen Frosted Glass Card (Version 1 - Blur)
-     * SurfaceFlinger wallpaper blur + frosted tint + highlight border + PredictiveBack easing fade
+     * Authentic Nothing OS FrostedBackdropDrawable (exact widget frosted glass blur & tint)
+     * Supporting grouped notifications, child rows, shelf icon collage, and smooth bouncer/shade fade.
      */
     private static void renderLockscreenCard(
             Canvas canvas, View bgView, View row, boolean isShelf,
@@ -2757,90 +2758,76 @@ public class XposedInit implements IXposedHookLoadPackage {
         bgView.setTag(TAG_KEY_BLUR_ACTIVE, Boolean.TRUE);
 
         Context ctx = bgView.getContext();
-        if (ctx != null) ensureBlurReflection(ctx.getClassLoader());
-
-        // 1. Hardware RenderNode Wallpaper Blur (SurfaceFlinger)
-        Object blurDrawable = null;
-        if (sBackgroundBlurDrawableField != null) {
-            try { blurDrawable = sBackgroundBlurDrawableField.get(bgView); } catch (Throwable ignored) {}
-        }
-        if (blurDrawable == null) {
-            blurDrawable = bgView.getTag(TAG_KEY_BLUR_DRAWABLE);
-        }
-        if (blurDrawable == null) {
+        if (backdropProvider == null && providerClass != null) {
             try {
-                Object vri = (sGetViewRootImplMethod != null) ? sGetViewRootImplMethod.invoke(bgView)
-                        : XposedHelpers.callMethod(bgView, "getViewRootImpl");
-                if (vri != null) {
-                    blurDrawable = (sCreateBackgroundBlurDrawableMethod != null)
-                            ? sCreateBackgroundBlurDrawableMethod.invoke(vri)
-                            : XposedHelpers.callMethod(vri, "createBackgroundBlurDrawable");
-                    if (blurDrawable instanceof Drawable) {
-                        ((Drawable) blurDrawable).setCallback(bgView);
-                    }
-                    if (sBackgroundBlurDrawableField != null) {
-                        sBackgroundBlurDrawableField.set(bgView, blurDrawable);
-                    } else {
-                        XposedHelpers.setObjectField(bgView, "mBackgroundBlurDrawable", blurDrawable);
-                    }
-                    bgView.setTag(TAG_KEY_BLUR_DRAWABLE, blurDrawable);
-                }
+                Object companion = XposedHelpers.getStaticObjectField(providerClass, "Companion");
+                backdropProvider = XposedHelpers.callMethod(companion, "getInstance");
             } catch (Throwable ignored) {}
         }
 
-        if (blurDrawable != null) {
-            try { ((Drawable) blurDrawable).setVisible(true, false); } catch (Throwable ignored) {}
-            if (sSetColorMethod != null) {
-                try { sSetColorMethod.invoke(blurDrawable, 0); } catch (Throwable ignored) {}
-            } else {
-                try { XposedHelpers.callMethod(blurDrawable, "setColor", 0); } catch (Throwable ignored) {}
-            }
-
-            final int CONSTANT_BLUR_RADIUS = 150;
-            Integer lastRadius = (Integer) bgView.getTag(TAG_KEY_LAST_BLUR_RADIUS);
-            if (lastRadius == null || lastRadius != CONSTANT_BLUR_RADIUS) {
-                if (sSetBlurRadiusMethod != null) {
-                    try { sSetBlurRadiusMethod.invoke(blurDrawable, CONSTANT_BLUR_RADIUS); } catch (Throwable ignored) {}
-                } else {
-                    try { XposedHelpers.callMethod(blurDrawable, "setBlurRadius", CONSTANT_BLUR_RADIUS); } catch (Throwable ignored) {}
-                }
-                bgView.setTag(TAG_KEY_LAST_BLUR_RADIUS, CONSTANT_BLUR_RADIUS);
-            }
+        // Get or create FrostedBackdropDrawable for this lockscreen card
+        Drawable frosted = (Drawable) bgView.getTag(TAG_KEY_FROSTED_DRAWABLE);
+        if (frosted == null && backdropProvider != null && drawableClass != null && ctx != null) {
             try {
-                int blurAlpha = Math.max(0, Math.min(255, Math.round(255 * combinedAlpha * blurWeight)));
-                ((Drawable) blurDrawable).setAlpha(blurAlpha);
-            } catch (Throwable ignored) {}
-
-            if (sSetCornerRadiusMethod != null) {
-                try { sSetCornerRadiusMethod.invoke(blurDrawable, topRadius, topRadius, bottomRadius, bottomRadius); } catch (Throwable ignored) {}
-            } else if (sSetCornerRadiusSingleMethod != null) {
-                try { sSetCornerRadiusSingleMethod.invoke(blurDrawable, Math.max(topRadius, bottomRadius)); } catch (Throwable ignored) {}
+                frosted = (Drawable) XposedHelpers.newInstance(drawableClass, ctx, backdropProvider);
+                if (frosted != null) {
+                    frosted.setCallback(null);
+                    if (setAnimateEntranceMethod != null) {
+                        try { setAnimateEntranceMethod.invoke(frosted, false); } catch (Throwable ignored) {}
+                    }
+                    if (completeTransitionNowMethod != null) {
+                        try { completeTransitionNowMethod.invoke(frosted); } catch (Throwable ignored) {}
+                    }
+                    if (onThemeChangedMethod != null) {
+                        try { onThemeChangedMethod.invoke(frosted); } catch (Throwable ignored) {}
+                    }
+                    bgView.setTag(TAG_KEY_FROSTED_DRAWABLE, frosted);
+                }
+            } catch (Throwable t) {
+                Log.e(TAG, "Failed creating FrostedBackdropDrawable for Lockscreen: " + t);
             }
-            Drawable bd = (Drawable) blurDrawable;
-            bd.setBounds(drawLeft, drawTop, drawRight, drawBottom);
-            bd.draw(canvas);
         }
 
-        // 2. Frosted Glass Tint & Specular Border Highlight
-        int frostedColor = isDark
-                ? (isShelf ? 0x68000000 : 0x60000000)
-                : (isShelf ? 0x90FFFFFF : 0x85FFFFFF);
-        int baseBorderAlpha = isDark ? 0x28 : 0x38;
+        // 1. Render authentic Nothing OS frosted glass card
+        if (frosted != null) {
+            if (ctx != null) {
+                int currentUiMode = ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+                Integer lastUi = (Integer) bgView.getTag(TAG_KEY_LAST_UI_MODE);
+                if (lastUi == null || lastUi != currentUiMode) {
+                    if (onThemeChangedMethod != null) {
+                        try { onThemeChangedMethod.invoke(frosted); } catch (Throwable ignored) {}
+                    }
+                    bgView.setTag(TAG_KEY_LAST_UI_MODE, currentUiMode);
+                }
+            }
 
-        int baseTintAlpha = Color.alpha(frostedColor);
-        int animTintAlpha = Math.round(baseTintAlpha * combinedAlpha * blurWeight);
-        glassTintPaint.setColor((frostedColor & 0x00FFFFFF) | (animTintAlpha << 24));
+            if (setClipRadiusMethod != null) {
+                try { setClipRadiusMethod.invoke(frosted, Math.max(topRadius, bottomRadius)); } catch (Throwable ignored) {}
+            }
 
-        int animBorderAlpha = Math.round(baseBorderAlpha * combinedAlpha * blurWeight);
-        glassBorderPaint.setColor((0x00FFFFFF) | (animBorderAlpha << 24));
-        glassBorderPaint.setStrokeWidth(1.0f * densityF);
+            int[] loc = new int[2];
+            bgView.getLocationOnScreen(loc);
+            float screenX = loc[0] + drawLeft;
+            float screenY = loc[1] + drawTop;
 
-        canvas.drawPath(clipPath, glassTintPaint);
-        canvas.restore(); // Restore clip so border stroke is not clipped
-        canvas.drawPath(clipPath, glassBorderPaint);
-        canvas.save(); // Save again for ripple/restore
+            if (updateOffsetMethod != null) {
+                try { updateOffsetMethod.invoke(frosted, screenX, screenY); } catch (Throwable ignored) {}
+            }
 
-        // 3. Ripple effect for touch feedback on lockscreen frosted glass cards
+            frosted.setBounds(drawLeft, drawTop, drawRight, drawBottom);
+            int alpha255 = Math.max(0, Math.min(255, Math.round(255 * combinedAlpha * blurWeight)));
+            frosted.setAlpha(alpha255);
+            frosted.draw(canvas);
+        } else {
+            // Fallback to widget frosted plate if FrostedBackdropDrawable is not yet ready
+            int frostedColor = getFrostedBackdropColor(ctx, isDark);
+            int baseTintAlpha = Color.alpha(frostedColor);
+            int animTintAlpha = Math.round(baseTintAlpha * combinedAlpha * blurWeight);
+            glassTintPaint.setColor((frostedColor & 0x00FFFFFF) | (animTintAlpha << 24));
+            canvas.drawPath(clipPath, glassTintPaint);
+        }
+
+        // 2. Ripple effect for touch feedback on lockscreen cards
         Drawable ripple = (Drawable) bgView.getTag(TAG_KEY_RIPPLE);
         if (ripple == null) {
             try {
