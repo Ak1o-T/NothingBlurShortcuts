@@ -211,6 +211,7 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static final int TAG_KEY_RIPPLE = 0x7f0b9104;
     private static final int TAG_KEY_BLUR_ACTIVE = 0x7f0b9105;
     private static final int TAG_KEY_LAST_BLUR_RADIUS = 0x7f0b9106;
+    private static final int TAG_KEY_BLUR_DRAWABLE = 0x7f0b9107;
 
     // Cached Volume Dialog resource IDs for zero-overhead styling
     private static int sIdExpandContainer = -1;
@@ -2015,8 +2016,35 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
                     }
 
-                    float shadeProgress = getShadeProgress();
-                    boolean isHun = !isShelf && (shadeProgress < 0.05f) && isRowHun(row);
+                    // 1. Version 3: Floating Heads-Up Notification (HUN)
+                    boolean isHun = !isShelf && isRowHun(row);
+
+                    // 2. Version 1 vs Version 2 Detection:
+                    // Determine if row is on Lockscreen / Keyguard
+                    boolean onKeyguard = (sStatusBarState == 1);
+                    if (!onKeyguard && row != null && sIsOnKeyguardMethod != null) {
+                        try {
+                            Boolean ok = (Boolean) sIsOnKeyguardMethod.invoke(row);
+                            if (Boolean.TRUE.equals(ok) && sStatusBarState != 0) {
+                                onKeyguard = true;
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                    if (!onKeyguard) {
+                        int curState = getCurrentStatusBarState();
+                        if (curState == 1) onKeyguard = true;
+                    }
+
+                    // Dynamic 120Hz Transition Architecture:
+                    // On Lockscreen, dragging down opens the shade (sLsToShadeProgress: 0.0=Lockscreen -> 1.0=Shade)
+                    float lsToShade = onKeyguard ? Math.max(0f, Math.min(1f, sLsToShadeProgress)) : 1.0f;
+                    float blurWeight = isHun ? 1.0f : (onKeyguard ? (1.0f - lsToShade) : 0.0f);
+                    float solidWeight = isHun ? 0.0f : (onKeyguard ? lsToShade : 1.0f);
+                    if (!sScreenAwake || sBouncerFullyShown) {
+                        blurWeight = 0f;
+                        solidWeight = 0f;
+                    }
+
                     boolean isColorized = false;
                     if (!isShelf && row != null) {
                         Object colTag = row.getTag(TAG_KEY_IS_COLORIZED);
@@ -2047,7 +2075,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     if (isHun) {
                         effectiveAlpha = Math.max(0f, Math.min(1f, rowAlpha * bgAlpha));
                     } else {
-                        float keyguardFade = (sStatusBarState == 1) ? Math.min(stackAlpha, sKeyguardAlpha) : stackAlpha;
+                        float keyguardFade = onKeyguard ? Math.min(stackAlpha, sKeyguardAlpha) : stackAlpha;
                         effectiveAlpha = Math.max(0f, Math.min(1f, rowAlpha * bgAlpha * keyguardFade));
                     }
 
@@ -2059,16 +2087,6 @@ public class XposedInit implements IXposedHookLoadPackage {
                         }
                         param.setResult(null);
                         return;
-                    }
-
-                    // Dynamic 120Hz Transition Architecture:
-                    // Crossfades between View 1 (Frosted Glass Blur) and View 2 (Solid System Plate)
-                    // according to the continuous gesture progress (shadeProgress: 0.0=Lockscreen -> 1.0=Shade)
-                    float blurWeight = isHun ? 1.0f : (1.0f - shadeProgress);
-                    float solidWeight = isHun ? 0.0f : shadeProgress;
-                    if (!sScreenAwake || sBouncerFullyShown) {
-                        blurWeight = 0f;
-                        solidWeight = 0f;
                     }
 
                     Canvas canvas = (Canvas) param.args[0];
@@ -2730,10 +2748,16 @@ public class XposedInit implements IXposedHookLoadPackage {
             boolean isDark, float densityF, float combinedAlpha, float blurWeight) {
         bgView.setTag(TAG_KEY_BLUR_ACTIVE, Boolean.TRUE);
 
+        Context ctx = bgView.getContext();
+        if (ctx != null) ensureBlurReflection(ctx.getClassLoader());
+
         // 1. Hardware RenderNode Wallpaper Blur (SurfaceFlinger)
         Object blurDrawable = null;
         if (sBackgroundBlurDrawableField != null) {
             try { blurDrawable = sBackgroundBlurDrawableField.get(bgView); } catch (Throwable ignored) {}
+        }
+        if (blurDrawable == null) {
+            blurDrawable = bgView.getTag(TAG_KEY_BLUR_DRAWABLE);
         }
         if (blurDrawable == null) {
             try {
@@ -2751,6 +2775,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     } else {
                         XposedHelpers.setObjectField(bgView, "mBackgroundBlurDrawable", blurDrawable);
                     }
+                    bgView.setTag(TAG_KEY_BLUR_DRAWABLE, blurDrawable);
                 }
             } catch (Throwable ignored) {}
         }
@@ -2885,10 +2910,16 @@ public class XposedInit implements IXposedHookLoadPackage {
             boolean isDark, float densityF, float combinedAlpha) {
         bgView.setTag(TAG_KEY_BLUR_ACTIVE, Boolean.TRUE);
 
+        Context ctx = bgView.getContext();
+        if (ctx != null) ensureBlurReflection(ctx.getClassLoader());
+
         // 1. Hardware RenderNode Wallpaper Blur (SurfaceFlinger)
         Object blurDrawable = null;
         if (sBackgroundBlurDrawableField != null) {
             try { blurDrawable = sBackgroundBlurDrawableField.get(bgView); } catch (Throwable ignored) {}
+        }
+        if (blurDrawable == null) {
+            blurDrawable = bgView.getTag(TAG_KEY_BLUR_DRAWABLE);
         }
         if (blurDrawable == null) {
             try {
@@ -2906,6 +2937,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                     } else {
                         XposedHelpers.setObjectField(bgView, "mBackgroundBlurDrawable", blurDrawable);
                     }
+                    bgView.setTag(TAG_KEY_BLUR_DRAWABLE, blurDrawable);
                 }
             } catch (Throwable ignored) {}
         }
@@ -2991,38 +3023,27 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
     }
 
-    private static float getShadeProgress() {
-        if (sStatusBarState == 0 || sStatusBarState == 2) {
-            return 1.0f;
-        }
-        float progress = Math.max(sLsToShadeProgress, sFractionToShade);
-        if (sAmbientState != null) {
+    private static int getCurrentStatusBarState() {
+        if (sStatusBarStateController != null) {
             try {
-                Object exp = XposedHelpers.callMethod(sAmbientState, "getExpansionFraction");
-                if (exp instanceof Float) {
-                    float f = (Float) exp;
-                    if (f > progress) progress = f;
-                }
-            } catch (Throwable ignored) {}
-            try {
-                Object exp = XposedHelpers.callMethod(sAmbientState, "isShadeExpanded");
-                if (Boolean.TRUE.equals(exp)) return 1.0f;
-            } catch (Throwable ignored) {}
-        }
-        if (sNsslView != null) {
-            try {
-                if (sNsslIsExpandedMethod != null && (Boolean) sNsslIsExpandedMethod.invoke(sNsslView)) {
-                    return 1.0f;
+                if (sStateField != null) {
+                    return sStateField.getInt(sStatusBarStateController);
+                } else {
+                    Object state = XposedHelpers.getObjectField(sStatusBarStateController, "mState");
+                    if (state instanceof Integer) return (Integer) state;
                 }
             } catch (Throwable ignored) {}
         }
-        return Math.max(0f, Math.min(1f, progress));
+        return sStatusBarState;
     }
 
     private static boolean isRowHun(View row) {
         if (row == null) return false;
         try {
             if (sIsPinnedMethod != null && (Boolean) sIsPinnedMethod.invoke(row)) return true;
+        } catch (Throwable ignored) {}
+        try {
+            if (sIsPinnedAndExpandedMethod != null && (Boolean) sIsPinnedAndExpandedMethod.invoke(row)) return true;
         } catch (Throwable ignored) {}
         try {
             if (sIsHeadsUpAnimatingAwayMethod != null && (Boolean) sIsHeadsUpAnimatingAwayMethod.invoke(row)) return true;
