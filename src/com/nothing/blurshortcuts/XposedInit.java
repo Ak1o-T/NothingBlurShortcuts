@@ -599,22 +599,38 @@ public class XposedInit implements IXposedHookLoadPackage {
             XC_MethodHook volDecorHook = new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    android.app.Dialog dialog = null;
                     if (param.thisObject instanceof android.app.Dialog) {
-                        android.app.Dialog dialog = (android.app.Dialog) param.thisObject;
-                        if (dialog.getWindow() != null) {
-                            final View decor = dialog.getWindow().getDecorView();
-                            if (decor != null) {
-                                styleVolumeDialog(decor);
-                                if (decor.getTag(0x7f0b0b6a) == null) {
-                                    decor.setTag(0x7f0b0b6a, Boolean.TRUE);
-                                    decor.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
-                                        @Override
-                                        public void onLayoutChange(View v, int left, int top, int right, int bottom,
-                                                                   int oldLeft, int oldTop, int oldRight, int oldBottom) {
-                                            styleVolumeDialog(v);
-                                        }
-                                    });
-                                }
+                        dialog = (android.app.Dialog) param.thisObject;
+                    } else if (param.thisObject != null) {
+                        try {
+                            Field dField = param.thisObject.getClass().getDeclaredField("mDialog");
+                            dField.setAccessible(true);
+                            Object dObj = dField.get(param.thisObject);
+                            if (dObj instanceof android.app.Dialog) dialog = (android.app.Dialog) dObj;
+                        } catch (Throwable ignored) {}
+                        if (dialog == null) {
+                            try {
+                                Field dField = param.thisObject.getClass().getDeclaredField("dialog");
+                                dField.setAccessible(true);
+                                Object dObj = dField.get(param.thisObject);
+                                if (dObj instanceof android.app.Dialog) dialog = (android.app.Dialog) dObj;
+                            } catch (Throwable ignored) {}
+                        }
+                    }
+                    if (dialog != null && dialog.getWindow() != null) {
+                        final View decor = dialog.getWindow().getDecorView();
+                        if (decor != null) {
+                            styleVolumeDialog(decor);
+                            if (decor.getTag(0x7f0b0b6a) == null) {
+                                decor.setTag(0x7f0b0b6a, Boolean.TRUE);
+                                decor.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                                    @Override
+                                    public void onLayoutChange(View v, int left, int top, int right, int bottom,
+                                                               int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                                        styleVolumeDialog(v);
+                                    }
+                                });
                             }
                         }
                     }
@@ -624,6 +640,65 @@ public class XposedInit implements IXposedHookLoadPackage {
             try { XposedBridge.hookAllMethods(volDialogClass, "show", volDecorHook); } catch (Throwable ignored) {}
         } catch (Throwable t) {
             Log.e(TAG, "VolumeDialog class hook check: " + t.getMessage());
+        }
+
+        // Hook VolumeDialogImpl (handles mDialog in SystemUI)
+        try {
+            Class<?> volDialogImplClass = cl.loadClass("com.android.systemui.volume.VolumeDialogImpl");
+            XC_MethodHook vdiHook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    try {
+                        Field dField = param.thisObject.getClass().getDeclaredField("mDialog");
+                        dField.setAccessible(true);
+                        Object dObj = dField.get(param.thisObject);
+                        if (dObj instanceof android.app.Dialog) {
+                            android.app.Dialog dialog = (android.app.Dialog) dObj;
+                            if (dialog.getWindow() != null) {
+                                final View decor = dialog.getWindow().getDecorView();
+                                if (decor != null) {
+                                    styleVolumeDialog(decor);
+                                    if (decor.getTag(0x7f0b0b6a) == null) {
+                                        decor.setTag(0x7f0b0b6a, Boolean.TRUE);
+                                        decor.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                                            @Override
+                                            public void onLayoutChange(View v, int left, int top, int right, int bottom,
+                                                                       int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                                                styleVolumeDialog(v);
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {}
+                }
+            };
+            try { XposedBridge.hookAllMethods(volDialogImplClass, "initDialog", vdiHook); } catch (Throwable ignored) {}
+            try { XposedBridge.hookAllMethods(volDialogImplClass, "showH", vdiHook); } catch (Throwable ignored) {}
+        } catch (Throwable t) {
+            Log.e(TAG, "VolumeDialogImpl hook check: " + t.getMessage());
+        }
+
+        // Hook NTVolumeDialogSlidersViewBinder (Nothing OS custom slider view binder)
+        try {
+            Class<?> ntSlidersBinderCls = cl.loadClass("com.nothing.systemui.volume.dialog.sliders.ui.NTVolumeDialogSlidersViewBinder");
+            for (Method m : ntSlidersBinderCls.getDeclaredMethods()) {
+                m.setAccessible(true);
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        for (Object arg : param.args) {
+                            if (arg instanceof View) {
+                                styleVolumeDialog((View) arg);
+                            }
+                        }
+                    }
+                });
+            }
+            Log.e(TAG, "NTVolumeDialogSlidersViewBinder hooked for volume blur!");
+        } catch (Throwable t) {
+            Log.e(TAG, "NTVolumeDialogSlidersViewBinder hook check: " + t.getMessage());
         }
 
         // Hook VolumeDialogViewBinder to apply authentic Frosted Glass styling
@@ -2459,9 +2534,9 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
     }
 
-    private static void setupCaptionsBlur(final View captionsView, final int tintColor, final int strokeWidth, final int strokeColor) {
-        if (captionsView == null) return;
-        final Context ctx = captionsView.getContext();
+    private static void setupVolumeCapsuleBlur(final View capsuleView, final int tintColor, final int strokeWidth, final int strokeColor) {
+        if (capsuleView == null) return;
+        final Context ctx = capsuleView.getContext();
         if (ctx == null) return;
 
         ensureBlurReflection(ctx.getClassLoader());
@@ -2472,16 +2547,16 @@ public class XposedInit implements IXposedHookLoadPackage {
                 try {
                     Object vri = null;
                     if (sGetViewRootImplMethod != null) {
-                        try { vri = sGetViewRootImplMethod.invoke(captionsView); } catch (Throwable ignored) {}
-                        if (vri == null && captionsView.getRootView() != null) {
-                            try { vri = sGetViewRootImplMethod.invoke(captionsView.getRootView()); } catch (Throwable ignored) {}
+                        try { vri = sGetViewRootImplMethod.invoke(capsuleView); } catch (Throwable ignored) {}
+                        if (vri == null && capsuleView.getRootView() != null) {
+                            try { vri = sGetViewRootImplMethod.invoke(capsuleView.getRootView()); } catch (Throwable ignored) {}
                         }
                     }
 
                     Resources res = ctx.getResources();
                     float density = res.getDisplayMetrics().density;
                     int cornerRadius = Math.round(29.0f * density);
-                    int blurRadius = Math.round(23.0f * density);
+                    int blurRadius = Math.round(26.0f * density);
                     try {
                         int rId = res.getIdentifier("volume_dialog_panel_width_half", "dimen", "com.android.systemui");
                         if (rId != 0) cornerRadius = res.getDimensionPixelSize(rId);
@@ -2491,7 +2566,14 @@ public class XposedInit implements IXposedHookLoadPackage {
                         if (bId != 0) blurRadius = res.getDimensionPixelSize(bId);
                     } catch (Throwable ignored) {}
 
-                    Drawable currentBg = captionsView.getBackground();
+                    if (capsuleView.getWidth() > 0) {
+                        int halfW = capsuleView.getWidth() / 2;
+                        if (halfW > 0 && halfW <= cornerRadius * 2) {
+                            cornerRadius = halfW;
+                        }
+                    }
+
+                    Drawable currentBg = capsuleView.getBackground();
 
                     // 1. If already a LayerDrawable, update existing BackgroundBlurDrawable and GradientDrawable
                     if (currentBg instanceof LayerDrawable) {
@@ -2515,7 +2597,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                             }
                         }
                         if (hasBlur) {
-                            captionsView.invalidate();
+                            capsuleView.invalidate();
                             return;
                         }
                     }
@@ -2542,9 +2624,9 @@ public class XposedInit implements IXposedHookLoadPackage {
                             gd.setStroke(strokeWidth, strokeColor);
 
                             LayerDrawable ld = new LayerDrawable(new Drawable[] { (Drawable) blurDrawable, gd });
-                            captionsView.setBackground(ld);
-                            captionsView.invalidate();
-                            Log.e(TAG, "setupCaptionsBlur: Successfully created and attached LayerDrawable with BackgroundBlurDrawable to odi_captions!");
+                            capsuleView.setBackground(ld);
+                            capsuleView.invalidate();
+                            Log.e(TAG, "setupVolumeCapsuleBlur: Successfully attached BackgroundBlurDrawable to " + capsuleView);
                             return;
                         }
                     }
@@ -2553,15 +2635,15 @@ public class XposedInit implements IXposedHookLoadPackage {
                     if (currentBg != null) {
                         applyFrostedGlassToDrawable(currentBg, tintColor, strokeWidth, strokeColor);
                     }
-                    if (!captionsView.isAttachedToWindow()) {
-                        captionsView.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+                    if (!capsuleView.isAttachedToWindow()) {
+                        capsuleView.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
                             @Override
                             public void onViewAttachedToWindow(View v) {
                                 v.removeOnAttachStateChangeListener(this);
                                 v.post(new Runnable() {
                                     @Override
                                     public void run() {
-                                        setupCaptionsBlur(captionsView, tintColor, strokeWidth, strokeColor);
+                                        setupVolumeCapsuleBlur(capsuleView, tintColor, strokeWidth, strokeColor);
                                     }
                                 });
                             }
@@ -2570,15 +2652,15 @@ public class XposedInit implements IXposedHookLoadPackage {
                         });
                     }
                 } catch (Throwable t) {
-                    Log.e(TAG, "setupCaptionsBlur error: " + t.getMessage(), t);
+                    Log.e(TAG, "setupVolumeCapsuleBlur error: " + t.getMessage(), t);
                 }
             }
         };
 
-        if (captionsView.isAttachedToWindow()) {
+        if (capsuleView.isAttachedToWindow()) {
             applyRunnable.run();
         } else {
-            captionsView.post(applyRunnable);
+            capsuleView.post(applyRunnable);
             applyRunnable.run();
         }
     }
@@ -2635,7 +2717,7 @@ public class XposedInit implements IXposedHookLoadPackage {
         if (sIdVolumeBg != 0) {
             View bgView = root.findViewById(sIdVolumeBg);
             if (bgView != null) {
-                applyFrostedGlassToDrawable(bgView.getBackground(), tintColor, strokeWidth, strokeColor);
+                setupVolumeCapsuleBlur(bgView, tintColor, strokeWidth, strokeColor);
             }
         }
 
@@ -2643,7 +2725,7 @@ public class XposedInit implements IXposedHookLoadPackage {
         if (sIdRingerBg != 0) {
             View ringerBg = root.findViewById(sIdRingerBg);
             if (ringerBg != null) {
-                applyFrostedGlassToDrawable(ringerBg.getBackground(), tintColor, strokeWidth, strokeColor);
+                setupVolumeCapsuleBlur(ringerBg, tintColor, strokeWidth, strokeColor);
             }
         }
 
@@ -2662,14 +2744,14 @@ public class XposedInit implements IXposedHookLoadPackage {
         if (sIdA11y != 0) {
             View a11yView = root.findViewById(sIdA11y);
             if (a11yView != null) {
-                applyFrostedGlassToDrawable(a11yView.getBackground(), tintColor, strokeWidth, strokeColor);
+                setupVolumeCapsuleBlur(a11yView, tintColor, strokeWidth, strokeColor);
             }
         }
 
         if (sIdAssistant != 0) {
             View assistantView = root.findViewById(sIdAssistant);
             if (assistantView != null) {
-                applyFrostedGlassToDrawable(assistantView.getBackground(), tintColor, strokeWidth, strokeColor);
+                setupVolumeCapsuleBlur(assistantView, tintColor, strokeWidth, strokeColor);
             }
         }
 
