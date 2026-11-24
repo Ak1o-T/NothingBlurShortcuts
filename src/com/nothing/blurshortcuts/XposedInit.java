@@ -658,48 +658,53 @@ public class XposedInit implements IXposedHookLoadPackage {
             Log.e(TAG, "VolumeDialogSettingsButtonViewBinder hook check: " + t.getMessage());
         }
 
-        // Hook VolumeDialogCaptionsButtonViewBinder for Live Captions button styling
+        // Hook VolumeDialogCaptionsButtonViewBinder to cleanly hide the Live Captions button
         try {
             Class<?> captionsBinderCls = cl.loadClass("com.android.systemui.volume.dialog.captions.ui.binder.VolumeDialogCaptionsButtonViewBinder");
             for (Method m : captionsBinderCls.getDeclaredMethods()) {
                 m.setAccessible(true);
-                XposedBridge.hookMethod(m, new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        for (Object arg : param.args) {
-                            if (arg instanceof View) {
-                                styleVolumeDialog((View) arg);
+                if (m.getName().equals("bind$updateCaptionsContainer")) {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            if (param.args.length >= 4) {
+                                param.args[2] = false; // isExpanded = false
+                                param.args[3] = false; // isVisible = false
                             }
                         }
-                    }
-                });
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            if (param.args.length > 0 && param.args[0] instanceof View) {
+                                View v = (View) param.args[0];
+                                v.setVisibility(View.GONE);
+                            }
+                        }
+                    });
+                }
             }
-            Log.e(TAG, "VolumeDialogCaptionsButtonViewBinder hooked for frosted glass styling!");
+            Log.e(TAG, "VolumeDialogCaptionsButtonViewBinder hooked to hide Live Captions button!");
         } catch (Throwable t) {
             Log.e(TAG, "VolumeDialogCaptionsButtonViewBinder hook check: " + t.getMessage());
         }
 
-        // Hook CaptionsToggleImageButton directly so any state or visibility changes trigger styling
+        // Hook CaptionsToggleImageButton directly to keep it hidden
         try {
             Class<?> captionsBtnCls = cl.loadClass("com.android.systemui.volume.CaptionsToggleImageButton");
-            XC_MethodHook styleBtnHook = new XC_MethodHook() {
+            XC_MethodHook hideBtnHook = new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    View btn = (View) param.thisObject;
-                    if (btn != null) {
-                        View root = btn.getRootView();
-                        if (root != null) {
-                            styleVolumeDialog(root);
-                        } else {
-                            styleVolumeDialog(btn);
+                    if (param.thisObject instanceof View) {
+                        View btn = (View) param.thisObject;
+                        btn.setVisibility(View.GONE);
+                        ViewParent parent = btn.getParent();
+                        if (parent instanceof View) {
+                            ((View) parent).setVisibility(View.GONE);
                         }
                     }
                 }
             };
-            try { XposedBridge.hookAllMethods(captionsBtnCls, "onAttachedToWindow", styleBtnHook); } catch (Throwable ignored) {}
-            try { XposedBridge.hookAllMethods(captionsBtnCls, "setVisibility", styleBtnHook); } catch (Throwable ignored) {}
-            try { XposedBridge.hookAllMethods(captionsBtnCls, "setCaptionsEnabled", styleBtnHook); } catch (Throwable ignored) {}
-            Log.e(TAG, "CaptionsToggleImageButton hooked for frosted glass styling!");
+            try { XposedBridge.hookAllMethods(captionsBtnCls, "onAttachedToWindow", hideBtnHook); } catch (Throwable ignored) {}
+            Log.e(TAG, "CaptionsToggleImageButton hooked to hide captions button!");
         } catch (Throwable t) {
             Log.e(TAG, "CaptionsToggleImageButton hook check: " + t.getMessage());
         }
@@ -2585,15 +2590,15 @@ public class XposedInit implements IXposedHookLoadPackage {
             }
         }
 
-        // 4. Style odi_captions with genuine hardware BackgroundBlurDrawable
+        // 4. Hide odi_captions container so it does not bother the user
         if (sIdCaptions != 0) {
             View captionsView = root.findViewById(sIdCaptions);
             if (captionsView != null) {
-                setupCaptionsBlur(captionsView, tintColor, strokeWidth, strokeColor);
+                captionsView.setVisibility(View.GONE);
             }
         }
         if (root.getId() == sIdCaptions) {
-            setupCaptionsBlur(root, tintColor, strokeWidth, strokeColor);
+            root.setVisibility(View.GONE);
         }
 
         // 5. Style accessibility & assistant sliders if present
@@ -2611,32 +2616,18 @@ public class XposedInit implements IXposedHookLoadPackage {
             }
         }
 
-        // 6. Deep scan and style all Live Captions buttons and parent capsules
-        styleAllCaptionsViews(root, tintColor, strokeWidth, strokeColor);
+        // 6. Deep scan and hide all Live Captions buttons and parent capsules
+        styleAllCaptionsViews(root);
     }
 
-    private static void styleAllCaptionsViews(View v, int tintColor, int strokeWidth, int strokeColor) {
+    private static void styleAllCaptionsViews(View v) {
         if (v == null) return;
         String clsName = v.getClass().getName();
-        if (clsName.contains("CaptionsToggleImageButton") || clsName.contains("CaptionsButton")) {
+        if (clsName.contains("CaptionsToggleImageButton") || clsName.contains("CaptionsButton") || clsName.contains("odi_captions")) {
+            v.setVisibility(View.GONE);
             ViewParent parent = v.getParent();
             if (parent instanceof View) {
-                View parentView = (View) parent;
-                setupCaptionsBlur(parentView, tintColor, strokeWidth, strokeColor);
-            }
-            // Keep the button's background as TransitionDrawable to avoid NullPointerException in SystemUI Kotlin casts!
-            // Simply set all its layers to transparent so the parent's frosted capsule shows through.
-            Drawable btnBg = v.getBackground();
-            if (btnBg instanceof android.graphics.drawable.TransitionDrawable) {
-                android.graphics.drawable.TransitionDrawable td = (android.graphics.drawable.TransitionDrawable) btnBg;
-                for (int i = 0; i < td.getNumberOfLayers(); i++) {
-                    Drawable d = td.getDrawable(i);
-                    if (d instanceof android.graphics.drawable.GradientDrawable) {
-                        ((android.graphics.drawable.GradientDrawable) d).setColor(0x00000000);
-                    }
-                }
-            } else if (btnBg != null) {
-                applyFrostedGlassToDrawable(btnBg, tintColor, strokeWidth, strokeColor);
+                ((View) parent).setVisibility(View.GONE);
             }
             return;
         }
@@ -2644,7 +2635,7 @@ public class XposedInit implements IXposedHookLoadPackage {
             ViewGroup vg = (ViewGroup) v;
             int count = vg.getChildCount();
             for (int i = 0; i < count; i++) {
-                styleAllCaptionsViews(vg.getChildAt(i), tintColor, strokeWidth, strokeColor);
+                styleAllCaptionsViews(vg.getChildAt(i));
             }
         }
     }
