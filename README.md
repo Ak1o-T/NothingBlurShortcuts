@@ -18,6 +18,10 @@ An **Xposed / LSPosed** module for Nothing OS that brings authentic **Frosted Gl
 |:---:|:---:|
 | <img src="screenshots/lockscreen_dark.png" width="300" alt="Lockscreen Dark Mode"/> | <img src="screenshots/lockscreen_light.png" width="300" alt="Lockscreen Light Mode"/> |
 
+| Floating Heads-Up Alert (HUN) | Volume Slider & Expanded Menu |
+|:---:|:---:|
+| <img src="screenshots/heads_up_notification.png" width="300" alt="Floating Heads-Up Notification"/> | <img src="screenshots/volume_dialog.png" width="300" alt="Volume Dialog Menu"/> |
+
 | Notification Shade (Dark Mode) | Notification Shade (Light Mode) |
 |:---:|:---:|
 | <img src="screenshots/shade_dark.png" width="300" alt="Notification Shade Dark Mode"/> | <img src="screenshots/shade_light.png" width="300" alt="Notification Shade Light Mode"/> |
@@ -96,6 +100,10 @@ Output signed APK: `bin/NothingBlurShortcuts.apk`.
 | Экран блокировки (Тёмная тема) | Экран блокировки (Светлая тема) |
 |:---:|:---:|
 | <img src="screenshots/lockscreen_dark.png" width="300" alt="Экран блокировки — Тёмная тема"/> | <img src="screenshots/lockscreen_light.png" width="300" alt="Экран блокировки — Светлая тема"/> |
+
+| Всплывающее уведомление (Heads-Up) | Меню громкости (Volume Dialog) |
+|:---:|:---:|
+| <img src="screenshots/heads_up_notification.png" width="300" alt="Всплывающее уведомление Heads-Up"/> | <img src="screenshots/volume_dialog.png" width="300" alt="Меню громкости"/> |
 
 | Меню шторки (Тёмная тема) | Меню шторки (Светлая тема) |
 |:---:|:---:|
