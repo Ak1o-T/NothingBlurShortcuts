@@ -12,16 +12,30 @@ An **Xposed / LSPosed** module for Nothing OS that brings authentic **Frosted Gl
 
 # English
 
+## 🔗 Recommended Companion: NothingBlurIcons
+
+> [!TIP]
+> Complete your Nothing OS frosted glass aesthetic with [**NothingBlurIcons**](https://github.com/Ak1o-T/NothingBlurIcons)!
+> While **NothingBlurShortcuts** brings real-time wallpaper blur to lockscreen shortcut buttons, lockscreen notifications, and floating heads-up alerts, **NothingBlurIcons** extends this authentic Nothing OS frosted glass blur to all home screen and folder app icons. Together, they create a 100% unified Nothing OS visual experience.
+
 ## 📸 Screenshots
 
+### 🔒 Lockscreen (Dark vs Light)
 | Lockscreen (Dark Mode) | Lockscreen (Light Mode) |
 |:---:|:---:|
 | <img src="screenshots/lockscreen_dark.png" width="300" alt="Lockscreen Dark Mode"/> | <img src="screenshots/lockscreen_light.png" width="300" alt="Lockscreen Light Mode"/> |
 
-| Floating Heads-Up Alert (HUN) | Volume Slider & Expanded Menu |
+### 🚀 Floating Heads-Up Alerts (Dark vs Light)
+| Floating Heads-Up (Dark Mode) | Floating Heads-Up (Light Mode) |
 |:---:|:---:|
-| <img src="screenshots/heads_up_notification.png" width="300" alt="Floating Heads-Up Notification"/> | <img src="screenshots/volume_dialog.png" width="300" alt="Volume Dialog Menu"/> |
+| <img src="screenshots/heads_up_dark.png" width="300" alt="Floating Heads-Up Dark Mode"/> | <img src="screenshots/heads_up_light.png" width="300" alt="Floating Heads-Up Light Mode"/> |
 
+### 🔊 Volume Dialog Menu (Dark vs Light)
+| Volume Dialog (Dark Mode) | Volume Dialog (Light Mode) |
+|:---:|:---:|
+| <img src="screenshots/volume_dialog_dark.png" width="300" alt="Volume Dialog Dark Mode"/> | <img src="screenshots/volume_dialog_light.png" width="300" alt="Volume Dialog Light Mode"/> |
+
+### 🛡️ Notification Shade Menu (Stock System Background, Zero Blur)
 | Notification Shade (Dark Mode) | Notification Shade (Light Mode) |
 |:---:|:---:|
 | <img src="screenshots/shade_dark.png" width="300" alt="Notification Shade Dark Mode"/> | <img src="screenshots/shade_light.png" width="300" alt="Notification Shade Light Mode"/> |
@@ -95,16 +109,30 @@ Output signed APK: `bin/NothingBlurShortcuts.apk`.
 
 # Русский
 
+## 🔗 Рекомендуемое дополнение: NothingBlurIcons
+
+> [!TIP]
+> Создайте полноценный единый стиль матового стекла Nothing OS с помощью [**NothingBlurIcons**](https://github.com/Ak1o-T/NothingBlurIcons)!
+> В то время как **NothingBlurShortcuts** добавляет аутентичное размытие обоев для кнопок быстрого доступа и уведомлений на экране блокировки, **NothingBlurIcons** расширяет этот фирменный блюр Nothing OS на все иконки приложений рабочего стола и внутри папок. Вместе они идеально дополняют друг друга.
+
 ## 📸 Скриншоты
 
+### 🔒 Экран блокировки (Тёмная vs Светлая тема)
 | Экран блокировки (Тёмная тема) | Экран блокировки (Светлая тема) |
 |:---:|:---:|
 | <img src="screenshots/lockscreen_dark.png" width="300" alt="Экран блокировки — Тёмная тема"/> | <img src="screenshots/lockscreen_light.png" width="300" alt="Экран блокировки — Светлая тема"/> |
 
-| Всплывающее уведомление (Heads-Up) | Меню громкости (Volume Dialog) |
+### 🚀 Всплывающие уведомления Heads-Up (Тёмная vs Светлая тема)
+| Всплывающее уведомление (Тёмная тема) | Всплывающее уведомление (Светлая тема) |
 |:---:|:---:|
-| <img src="screenshots/heads_up_notification.png" width="300" alt="Всплывающее уведомление Heads-Up"/> | <img src="screenshots/volume_dialog.png" width="300" alt="Меню громкости"/> |
+| <img src="screenshots/heads_up_dark.png" width="300" alt="Всплывающее уведомление — Тёмная тема"/> | <img src="screenshots/heads_up_light.png" width="300" alt="Всплывающее уведомление — Светлая тема"/> |
 
+### 🔊 Меню громкости Volume Dialog (Тёмная vs Светлая тема)
+| Меню громкости (Тёмная тема) | Меню громкости (Светлая тема) |
+|:---:|:---:|
+| <img src="screenshots/volume_dialog_dark.png" width="300" alt="Меню громкости — Тёмная тема"/> | <img src="screenshots/volume_dialog_light.png" width="300" alt="Меню громкости — Светлая тема"/> |
+
+### 🛡️ Меню шторки уведомлений (Стоковый системный фон, без блюра)
 | Меню шторки (Тёмная тема) | Меню шторки (Светлая тема) |
 |:---:|:---:|
 | <img src="screenshots/shade_dark.png" width="300" alt="Меню уведомлений — Тёмная тема"/> | <img src="screenshots/shade_light.png" width="300" alt="Меню уведомлений — Светлая тема"/> |
