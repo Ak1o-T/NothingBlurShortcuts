@@ -326,21 +326,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                 }
             });
 
-            XposedBridge.hookAllMethods(flagsClass, "blurOnMoreSurfaces", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    param.setResult(true);
-                }
-            });
-
-            XposedBridge.hookAllMethods(flagsClass, "lockscreenBlurForNotifications", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    param.setResult(true);
-                }
-            });
-
-            Log.e(TAG, "Successfully enabled Flags.enableLockscreenBlur, blurOnMoreSurfaces & lockscreenBlurForNotifications!");
+            Log.e(TAG, "Successfully enabled Flags.enableLockscreenBlur!");
         } catch (Throwable t) {
             Log.e(TAG, "Flags hook check: " + t.getMessage());
         }
@@ -1910,6 +1896,18 @@ public class XposedInit implements IXposedHookLoadPackage {
                     boolean isShelf = bgCls.contains("Shelf")
                             || (row != null && row.getClass().getName().contains("Shelf"))
                             || (shelfCls != null && row != null && shelfCls.isAssignableFrom(row.getClass()));
+
+                    // Fast-path for pure Shade mode (Home / App -> Notification Shade):
+                    // Skip all view-tree walks, reflection, and clipPath overhead, and let stock
+                    // NotificationBackgroundView.onDraw execute natively at full 120Hz!
+                    if (sStatusBarStateController != null && getCurrentStatusBarState() == 0 && sStatusBarState == 0) {
+                        if (isShelf || !isRowHun(row)) {
+                            if (Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
+                                cleanupBlur(bgView);
+                            }
+                            return;
+                        }
+                    }
 
                     boolean isChildOfGroup = false;
                     // Only mBackgroundNormal should ever draw notification card backgrounds.
