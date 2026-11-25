@@ -2466,6 +2466,113 @@ public class XposedInit implements IXposedHookLoadPackage {
         }
     }
 
+    /**
+     * Subclass of GradientDrawable that wraps BackgroundBlurDrawable so SystemUI binders
+     * (e.g. VolumeDialogRingerViewBinder.applyCorners) can safely cast getBackground() to
+     * GradientDrawable and animate corner radii without ClassCastException.
+     */
+    private static class BlurredCapsuleDrawable extends GradientDrawable {
+        private final Drawable mBlurDrawable;
+
+        BlurredCapsuleDrawable(Drawable blurDrawable) {
+            super();
+            mBlurDrawable = blurDrawable;
+        }
+
+        void updateBlur(int blurRadius, float cornerRadius) {
+            if (mBlurDrawable != null) {
+                if (sSetBlurRadiusMethod != null) {
+                    try { sSetBlurRadiusMethod.invoke(mBlurDrawable, blurRadius); } catch (Throwable ignored) {}
+                }
+                if (sSetCornerRadiusSingleMethod != null) {
+                    try { sSetCornerRadiusSingleMethod.invoke(mBlurDrawable, cornerRadius); } catch (Throwable ignored) {}
+                }
+            }
+            super.setCornerRadius(cornerRadius);
+        }
+
+        void setSyncAlpha(int alpha255) {
+            if (mBlurDrawable != null) {
+                mBlurDrawable.setAlpha(alpha255);
+                mBlurDrawable.setVisible(alpha255 > 0, false);
+            }
+            super.setAlpha(alpha255);
+        }
+
+        @Override
+        public Drawable mutate() {
+            return this;
+        }
+
+        @Override
+        public void setBounds(int left, int top, int right, int bottom) {
+            super.setBounds(left, top, right, bottom);
+            if (mBlurDrawable != null) {
+                mBlurDrawable.setBounds(left, top, right, bottom);
+            }
+        }
+
+        @Override
+        public void setBounds(Rect bounds) {
+            super.setBounds(bounds);
+            if (mBlurDrawable != null) {
+                mBlurDrawable.setBounds(bounds);
+            }
+        }
+
+        @Override
+        public void setCornerRadius(float radius) {
+            super.setCornerRadius(radius);
+            if (mBlurDrawable != null && sSetCornerRadiusSingleMethod != null) {
+                try { sSetCornerRadiusSingleMethod.invoke(mBlurDrawable, radius); } catch (Throwable ignored) {}
+            }
+        }
+
+        @Override
+        public void setCornerRadii(float[] radii) {
+            super.setCornerRadii(radii);
+            if (mBlurDrawable != null && radii != null && radii.length >= 8) {
+                if (sSetCornerRadiusMethod != null) {
+                    try {
+                        sSetCornerRadiusMethod.invoke(mBlurDrawable, radii[0], radii[2], radii[4], radii[6]);
+                    } catch (Throwable ignored) {
+                        if (sSetCornerRadiusSingleMethod != null) {
+                            try { sSetCornerRadiusSingleMethod.invoke(mBlurDrawable, radii[0]); } catch (Throwable ignored2) {}
+                        }
+                    }
+                } else if (sSetCornerRadiusSingleMethod != null) {
+                    try { sSetCornerRadiusSingleMethod.invoke(mBlurDrawable, radii[0]); } catch (Throwable ignored) {}
+                }
+            }
+        }
+
+        @Override
+        public void setAlpha(int alpha) {
+            super.setAlpha(alpha);
+            if (mBlurDrawable != null) {
+                mBlurDrawable.setAlpha(alpha);
+                mBlurDrawable.setVisible(alpha > 0, false);
+            }
+        }
+
+        @Override
+        public boolean setVisible(boolean visible, boolean restart) {
+            boolean changed = super.setVisible(visible, restart);
+            if (mBlurDrawable != null) {
+                mBlurDrawable.setVisible(visible, restart);
+            }
+            return changed;
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            if (mBlurDrawable != null) {
+                mBlurDrawable.draw(canvas);
+            }
+            super.draw(canvas);
+        }
+    }
+
     private static void setupVolumeCapsuleBlur(final View capsuleView, final int tintColor, final int strokeWidth, final int strokeColor) {
         if (capsuleView == null) return;
         final Context ctx = capsuleView.getContext();
@@ -2507,34 +2614,18 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                     Drawable currentBg = capsuleView.getBackground();
 
-                    // 1. If already a LayerDrawable, update existing BackgroundBlurDrawable and GradientDrawable
-                    if (currentBg instanceof LayerDrawable) {
-                        LayerDrawable ld = (LayerDrawable) currentBg;
-                        boolean hasBlur = false;
-                        for (int i = 0; i < ld.getNumberOfLayers(); i++) {
-                            Drawable layer = ld.getDrawable(i);
-                            if (layer != null && layer.getClass().getName().contains("BackgroundBlurDrawable")) {
-                                hasBlur = true;
-                                if (sSetBlurRadiusMethod != null) {
-                                    try { sSetBlurRadiusMethod.invoke(layer, blurRadius); } catch (Throwable ignored) {}
-                                }
-                                if (sSetCornerRadiusSingleMethod != null) {
-                                    try { sSetCornerRadiusSingleMethod.invoke(layer, (float) cornerRadius); } catch (Throwable ignored) {}
-                                }
-                            } else if (layer instanceof GradientDrawable) {
-                                GradientDrawable gd = (GradientDrawable) layer;
-                                gd.setColor(tintColor);
-                                gd.setStroke(strokeWidth, strokeColor);
-                                gd.setCornerRadius(cornerRadius);
-                            }
-                        }
-                        if (hasBlur) {
-                            capsuleView.invalidate();
-                            return;
-                        }
+                    // 1. If already a BlurredCapsuleDrawable, update its blur & tint parameters
+                    if (currentBg instanceof BlurredCapsuleDrawable) {
+                        BlurredCapsuleDrawable bcd = (BlurredCapsuleDrawable) currentBg;
+                        bcd.updateBlur(blurRadius, cornerRadius);
+                        bcd.setColor(tintColor);
+                        bcd.setStroke(strokeWidth, strokeColor);
+                        capsuleView.invalidate();
+                        return;
                     }
 
-                    // 2. If ViewRootImpl is available, create BackgroundBlurDrawable and combine into LayerDrawable
+                    // 2. If ViewRootImpl is available, create BackgroundBlurDrawable wrapped in BlurredCapsuleDrawable
+                    //    (extends GradientDrawable so SystemUI binders casting background to GradientDrawable never crash!)
                     if (vri != null && sCreateBackgroundBlurDrawableMethod != null) {
                         Object blurDrawable = sCreateBackgroundBlurDrawableMethod.invoke(vri);
                         if (blurDrawable instanceof Drawable) {
@@ -2545,25 +2636,17 @@ public class XposedInit implements IXposedHookLoadPackage {
                                 try { sSetBlurRadiusMethod.invoke(blurDrawable, blurRadius); } catch (Throwable ignored) {}
                             }
 
-                            GradientDrawable gd;
-                            if (currentBg instanceof GradientDrawable) {
-                                gd = (GradientDrawable) currentBg.mutate();
-                            } else {
-                                gd = new GradientDrawable();
-                            }
-                            gd.setCornerRadius(cornerRadius);
-                            gd.setColor(tintColor);
-                            gd.setStroke(strokeWidth, strokeColor);
-
-                            LayerDrawable ld = new LayerDrawable(new Drawable[] { (Drawable) blurDrawable, gd });
-                            capsuleView.setBackground(ld);
+                            BlurredCapsuleDrawable bcd = new BlurredCapsuleDrawable((Drawable) blurDrawable);
+                            bcd.setCornerRadius(cornerRadius);
+                            bcd.setColor(tintColor);
+                            bcd.setStroke(strokeWidth, strokeColor);
+                            capsuleView.setBackground(bcd);
 
                             // Sync blur & tint visibility/alpha with parent container reveal animation
                             // and suppress pre-layout placeholder flash (e.g. 241px button-sized state before slider expands)
                             if (!Boolean.TRUE.equals(capsuleView.getTag(TAG_KEY_VOL_PREDRAW))) {
                                 capsuleView.setTag(TAG_KEY_VOL_PREDRAW, Boolean.TRUE);
-                                final Drawable bdRef = (Drawable) blurDrawable;
-                                final GradientDrawable gdRef = gd;
+                                final BlurredCapsuleDrawable bcdRef = bcd;
                                 final boolean isMainVolBg = (sIdVolumeBg > 0 && capsuleView.getId() == sIdVolumeBg);
                                 final int minVolHeightPx = Math.round(95.0f * density);
 
@@ -2585,9 +2668,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                                             }
                                         }
                                         int a255 = ready ? Math.max(0, Math.min(255, Math.round(255f * effAlpha))) : 0;
-                                        bdRef.setAlpha(a255);
-                                        bdRef.setVisible(a255 > 0, false);
-                                        gdRef.setAlpha(a255);
+                                        bcdRef.setSyncAlpha(a255);
                                         return true;
                                     }
                                 };
@@ -2599,7 +2680,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                             }
 
                             capsuleView.invalidate();
-                            Log.e(TAG, "setupVolumeCapsuleBlur: Successfully attached BackgroundBlurDrawable to " + capsuleView);
+                            Log.e(TAG, "setupVolumeCapsuleBlur: Successfully attached BlurredCapsuleDrawable to " + capsuleView);
                             return;
                         }
                     }
