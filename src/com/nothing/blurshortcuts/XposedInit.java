@@ -8,14 +8,18 @@ import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.LinearGradient;
 import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.graphics.RuntimeShader;
+import android.graphics.Shader;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.LayerDrawable;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -238,12 +242,38 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static final Paint glassTintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint glassBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint solidBgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private static final Paint sHunGlassPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private static final Paint sHunBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+    // AGSL RuntimeShader for authentic Nothing OS frosted glass micro-grain & specular sheen
+    private static final String HUN_FROSTED_AGSL =
+            "uniform float2 uOrigin;\n" +
+            "uniform float2 uSize;\n" +
+            "uniform float uAlpha;\n" +
+            "uniform float uIsDark;\n" +
+            "half4 main(float2 fragCoord) {\n" +
+            "    float2 uv = clamp((fragCoord - uOrigin) / max(uSize, float2(1.0)), 0.0, 1.0);\n" +
+            "    float sheen = smoothstep(0.30, 0.0, uv.y) * mix(0.085, 0.055, uIsDark);\n" +
+            "    float n = fract(sin(dot(floor(fragCoord), float2(12.9898, 78.233))) * 43758.5453);\n" +
+            "    float grain = n - 0.5;\n" +
+            "    float whiteA = (sheen + max(0.0, grain) * mix(0.048, 0.036, uIsDark)) * uAlpha;\n" +
+            "    float darkA = max(0.0, -grain) * mix(0.018, 0.030, uIsDark) * uAlpha;\n" +
+            "    float outA = clamp(whiteA + darkA, 0.0, 1.0);\n" +
+            "    return half4(half3(clamp(whiteA, 0.0, 1.0)), half(outA));\n" +
+            "}\n";
+    private static Object sHunFrostedShader = null;
+    private static boolean sHunShaderInitFailed = false;
+    private static LinearGradient sCachedHunBorderGrad = null;
+    private static int sCachedBorderL = -1, sCachedBorderT = -1, sCachedBorderR = -1, sCachedBorderB = -1;
+    private static boolean sCachedBorderDark = false;
 
     static {
         glassTintPaint.setStyle(Paint.Style.FILL);
         glassBorderPaint.setStyle(Paint.Style.STROKE);
         glassBorderPaint.setStrokeWidth(2.0f); // 2px crisp specular border
         solidBgPaint.setStyle(Paint.Style.FILL);
+        sHunGlassPaint.setStyle(Paint.Style.FILL);
+        sHunBorderPaint.setStyle(Paint.Style.STROKE);
     }
 
     @Override
@@ -2991,13 +3021,47 @@ public class XposedInit implements IXposedHookLoadPackage {
             canvas.drawPath(clipPath, glassTintPaint);
         }
 
-        // 5. Crisp specular glass border highlight (Nothing OS design signature)
-        int borderColor = isDark ? 0x2EFFFFFF : 0x30FFFFFF;
-        int borderAlpha = Math.round(Color.alpha(borderColor) * combinedAlpha);
-        if (borderAlpha > 0) {
-            glassBorderPaint.setColor((borderColor & 0x00FFFFFF) | (borderAlpha << 24));
-            glassBorderPaint.setStrokeWidth(Math.max(1.5f, 1.0f * densityF));
-            canvas.drawPath(clipPath, glassBorderPaint);
+        // 4b. AGSL Frosted Glass micro-grain & subtle top specular sheen (Android 13+)
+        if (Build.VERSION.SDK_INT >= 33 && combinedAlpha > 0.01f && !sHunShaderInitFailed) {
+            try {
+                if (sHunFrostedShader == null) {
+                    sHunFrostedShader = new RuntimeShader(HUN_FROSTED_AGSL);
+                    sHunGlassPaint.setShader((Shader) sHunFrostedShader);
+                }
+                RuntimeShader shader = (RuntimeShader) sHunFrostedShader;
+                shader.setFloatUniform("uOrigin", (float) drawLeft, (float) drawTop);
+                shader.setFloatUniform("uSize", (float) Math.max(1, drawRight - drawLeft), (float) Math.max(1, drawBottom - drawTop));
+                shader.setFloatUniform("uAlpha", combinedAlpha);
+                shader.setFloatUniform("uIsDark", isDark ? 1.0f : 0.0f);
+                canvas.drawPath(clipPath, sHunGlassPaint);
+            } catch (Throwable t) {
+                sHunShaderInitFailed = true;
+                Log.e(TAG, "AGSL frosted shader unavailable: " + t);
+            }
+        }
+
+        // 5. Crisp directional specular glass border highlight (Nothing OS design signature)
+        if (alpha255 > 0) {
+            if (sCachedHunBorderGrad == null
+                    || sCachedBorderL != drawLeft || sCachedBorderT != drawTop
+                    || sCachedBorderR != drawRight || sCachedBorderB != drawBottom
+                    || sCachedBorderDark != isDark) {
+                int[] gradColors = isDark
+                        ? new int[]{0x64FFFFFF, 0x20FFFFFF, 0x36FFFFFF}
+                        : new int[]{0x90FFFFFF, 0x38FFFFFF, 0x52FFFFFF};
+                sCachedHunBorderGrad = new LinearGradient(
+                        drawLeft, drawTop, drawRight, drawBottom,
+                        gradColors, new float[]{0.0f, 0.48f, 1.0f}, Shader.TileMode.CLAMP);
+                sCachedBorderL = drawLeft;
+                sCachedBorderT = drawTop;
+                sCachedBorderR = drawRight;
+                sCachedBorderB = drawBottom;
+                sCachedBorderDark = isDark;
+                sHunBorderPaint.setShader(sCachedHunBorderGrad);
+            }
+            sHunBorderPaint.setAlpha(alpha255);
+            sHunBorderPaint.setStrokeWidth(Math.max(1.5f, 1.05f * densityF));
+            canvas.drawPath(clipPath, sHunBorderPaint);
         }
 
         // 6. Ripple effect for touch feedback on floating HUN cards
