@@ -222,6 +222,9 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static final int TAG_KEY_HUN_VELOCITY_Y = 0x7f0b910a;
     private static final int TAG_KEY_HUN_VELOCITY_X = 0x7f0b910b;
     private static final int TAG_KEY_ROW_BG = 0x7f0b910c;
+    private static final int TAG_KEY_WAS_HUN = 0x7f0b910d;
+    private static final int TAG_KEY_HUN_VELOCITY_TOP = 0x7f0b910e;
+    private static final int TAG_KEY_HUN_VELOCITY_BOT = 0x7f0b910f;
 
     // Cached Volume Dialog resource IDs for zero-overhead styling
     private static int sIdExpandContainer = -1;
@@ -1789,11 +1792,14 @@ public class XposedInit implements IXposedHookLoadPackage {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         View row = (View) param.thisObject;
-                        if (row != null && sBackgroundNormalField != null) {
-                            try {
-                                View bgNormal = (View) sBackgroundNormalField.get(row);
-                                if (bgNormal != null) cleanupBlur(bgNormal);
-                            } catch (Throwable ignored) {}
+                        if (row != null) {
+                            row.setTag(TAG_KEY_WAS_HUN, null);
+                            if (sBackgroundNormalField != null) {
+                                try {
+                                    View bgNormal = (View) sBackgroundNormalField.get(row);
+                                    if (bgNormal != null) cleanupBlur(bgNormal);
+                                } catch (Throwable ignored) {}
+                            }
                         }
                     }
                 });
@@ -2094,7 +2100,13 @@ public class XposedInit implements IXposedHookLoadPackage {
                     }
 
                     if (combinedAlpha < 0.01f) {
-                        if (!isHun && Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
+                        if (isHun) {
+                            Object bdObj = bgView.getTag(TAG_KEY_BLUR_DRAWABLE);
+                            if (bdObj instanceof Drawable) {
+                                ((Drawable) bdObj).setAlpha(0);
+                                ((Drawable) bdObj).setVisible(false, false);
+                            }
+                        } else if (Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
                             cleanupBlur(bgView);
                         }
                         param.setResult(null);
@@ -2203,7 +2215,13 @@ public class XposedInit implements IXposedHookLoadPackage {
                     int drawBottom = clipBottom > 0 ? (actualHeight - clipBottom) : actualHeight;
 
                     if (drawRight <= drawLeft || drawBottom <= drawTop) {
-                        if (!isHun && Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
+                        if (isHun) {
+                            Object bdObj = bgView.getTag(TAG_KEY_BLUR_DRAWABLE);
+                            if (bdObj instanceof Drawable) {
+                                ((Drawable) bdObj).setAlpha(0);
+                                ((Drawable) bdObj).setVisible(false, false);
+                            }
+                        } else if (Boolean.TRUE.equals(bgView.getTag(TAG_KEY_BLUR_ACTIVE))) {
                             cleanupBlur(bgView);
                         }
                         param.setResult(null);
@@ -2978,38 +2996,57 @@ public class XposedInit implements IXposedHookLoadPackage {
         if (tagVx instanceof Float) vx = (Float) tagVx;
 
         // Predictive lead shift: SurfaceFlinger applies blur on the next VSYNC frame,
-        // so we tell SurfaceFlinger where the moving view will be on that next frame!
+        // so we tell SurfaceFlinger where the moving & shrinking view will be on that next frame!
         int leadY = Math.max(-150, Math.min(150, Math.round(vy * 1.15f)));
         int leadX = Math.max(-150, Math.min(150, Math.round(vx * 1.15f)));
 
+        float vTop = 0f;
+        Object tagVTop = bgView.getTag(TAG_KEY_HUN_VELOCITY_TOP);
+        if (tagVTop instanceof Float) vTop = (Float) tagVTop;
+
+        float vBot = 0f;
+        Object tagVBot = bgView.getTag(TAG_KEY_HUN_VELOCITY_BOT);
+        if (tagVBot instanceof Float) vBot = (Float) tagVBot;
+
+        int leadTop = Math.max(-120, Math.min(120, Math.round(vTop * 1.15f)));
+        int leadBot = Math.max(-120, Math.min(120, Math.round(vBot * 1.15f)));
+
         int blurLeft = drawLeft + leadX;
-        int blurTop = drawTop + leadY;
+        int blurTop = drawTop + leadY + leadTop;
         int blurRight = drawRight + leadX;
-        int blurBottom = drawBottom + leadY;
+        int blurBottom = Math.max(blurTop, drawBottom + leadY + leadBot);
 
         // 3. Draw live window background blur
         int alpha255 = Math.max(0, Math.min(255, Math.round(255 * combinedAlpha)));
         if (blurDrawable != null) {
-            int blurRadius = Math.round(26.0f * densityF);
-            if (sSetBlurRadiusMethod != null) {
-                try { sSetBlurRadiusMethod.invoke(blurDrawable, blurRadius); } catch (Throwable ignored) {}
-            }
-            if (sSetCornerRadiusMethod != null) {
-                try {
-                    sSetCornerRadiusMethod.invoke(blurDrawable, topRadius, topRadius, bottomRadius, bottomRadius);
-                } catch (Throwable ignored) {
-                    if (sSetCornerRadiusSingleMethod != null) {
-                        try { sSetCornerRadiusSingleMethod.invoke(blurDrawable, topRadius); } catch (Throwable ignored2) {}
-                    }
+            if (blurBottom - blurTop <= 1 || blurRight - blurLeft <= 1 || alpha255 <= 0) {
+                blurDrawable.setAlpha(0);
+                blurDrawable.setVisible(false, false);
+            } else {
+                int blurRadius = Math.round(26.0f * densityF);
+                float blurMaxRadius = (blurBottom - blurTop) / 2.0f;
+                float effTopRadius = Math.min(topRadius, blurMaxRadius);
+                float effBottomRadius = Math.min(bottomRadius, blurMaxRadius);
+                if (sSetBlurRadiusMethod != null) {
+                    try { sSetBlurRadiusMethod.invoke(blurDrawable, blurRadius); } catch (Throwable ignored) {}
                 }
-            } else if (sSetCornerRadiusSingleMethod != null) {
-                try { sSetCornerRadiusSingleMethod.invoke(blurDrawable, topRadius); } catch (Throwable ignored) {}
-            }
+                if (sSetCornerRadiusMethod != null) {
+                    try {
+                        sSetCornerRadiusMethod.invoke(blurDrawable, effTopRadius, effTopRadius, effBottomRadius, effBottomRadius);
+                    } catch (Throwable ignored) {
+                        if (sSetCornerRadiusSingleMethod != null) {
+                            try { sSetCornerRadiusSingleMethod.invoke(blurDrawable, effTopRadius); } catch (Throwable ignored2) {}
+                        }
+                    }
+                } else if (sSetCornerRadiusSingleMethod != null) {
+                    try { sSetCornerRadiusSingleMethod.invoke(blurDrawable, effTopRadius); } catch (Throwable ignored) {}
+                }
 
-            blurDrawable.setBounds(blurLeft, blurTop, blurRight, blurBottom);
-            blurDrawable.setAlpha(alpha255);
-            blurDrawable.setVisible(alpha255 > 0, false);
-            blurDrawable.draw(canvas);
+                blurDrawable.setBounds(blurLeft, blurTop, blurRight, blurBottom);
+                blurDrawable.setAlpha(alpha255);
+                blurDrawable.setVisible(true, false);
+                blurDrawable.draw(canvas);
+            }
         }
 
         // 4. Render authentic Nothing OS translucent Lucent frosted tint over the blur
@@ -3109,17 +3146,58 @@ public class XposedInit implements IXposedHookLoadPackage {
         return sStatusBarState;
     }
 
+    private static boolean isShadeExpanded() {
+        if (sStatusBarState == 2) return true;
+        if (sNsslView != null && sNsslIsExpandedMethod != null) {
+            try {
+                return Boolean.TRUE.equals(sNsslIsExpandedMethod.invoke(sNsslView));
+            } catch (Throwable ignored) {}
+        }
+        return false;
+    }
+
     private static boolean isRowHun(View row) {
         if (row == null) return false;
         try {
-            if (sIsPinnedMethod != null && Boolean.TRUE.equals(sIsPinnedMethod.invoke(row))) return true;
+            if (sIsPinnedMethod != null && Boolean.TRUE.equals(sIsPinnedMethod.invoke(row))) {
+                row.setTag(TAG_KEY_WAS_HUN, Boolean.TRUE);
+                return true;
+            }
         } catch (Throwable ignored) {}
         try {
-            if (sIsPinnedAndExpandedMethod != null && Boolean.TRUE.equals(sIsPinnedAndExpandedMethod.invoke(row))) return true;
+            if (sIsPinnedAndExpandedMethod != null && Boolean.TRUE.equals(sIsPinnedAndExpandedMethod.invoke(row))) {
+                row.setTag(TAG_KEY_WAS_HUN, Boolean.TRUE);
+                return true;
+            }
         } catch (Throwable ignored) {}
         try {
-            if (sIsHeadsUpAnimatingAwayMethod != null && Boolean.TRUE.equals(sIsHeadsUpAnimatingAwayMethod.invoke(row))) return true;
+            if (sIsHeadsUpAnimatingAwayMethod != null && Boolean.TRUE.equals(sIsHeadsUpAnimatingAwayMethod.invoke(row))) {
+                row.setTag(TAG_KEY_WAS_HUN, Boolean.TRUE);
+                return true;
+            }
         } catch (Throwable ignored) {}
+
+        // Keep HUN blur active throughout the entire auto-hide / disappear shrink animation
+        // when the shade is closed, even if isPinned / isHeadsUpAnimatingAway flips early
+        if (getCurrentStatusBarState() == 0 && !isShadeExpanded()) {
+            try {
+                if (sIsHeadsUpMethod != null && Boolean.TRUE.equals(sIsHeadsUpMethod.invoke(row))) {
+                    row.setTag(TAG_KEY_WAS_HUN, Boolean.TRUE);
+                    return true;
+                }
+            } catch (Throwable ignored) {}
+            try {
+                if (sIsHeadsUpStateMethod != null && Boolean.TRUE.equals(sIsHeadsUpStateMethod.invoke(row))) {
+                    row.setTag(TAG_KEY_WAS_HUN, Boolean.TRUE);
+                    return true;
+                }
+            } catch (Throwable ignored) {}
+            if (Boolean.TRUE.equals(row.getTag(TAG_KEY_WAS_HUN))) {
+                return true;
+            }
+        } else {
+            row.setTag(TAG_KEY_WAS_HUN, null);
+        }
         return false;
     }
 
@@ -3132,8 +3210,11 @@ public class XposedInit implements IXposedHookLoadPackage {
         private float mLastScaleX = Float.NaN;
         private float mLastScaleY = Float.NaN;
         private int mLastActualHeight = -1;
+        private int mLastActualWidth = -1;
         private int mLastClipTop = -1;
         private int mLastClipBottom = -1;
+        private int mLastDrawTop = Integer.MIN_VALUE;
+        private int mLastDrawBottom = Integer.MIN_VALUE;
 
         HunPreDrawListener(View bgView, View row) {
             mBgViewRef = new WeakReference<>(bgView);
@@ -3155,12 +3236,29 @@ public class XposedInit implements IXposedHookLoadPackage {
                 float alpha = row.getAlpha() * bgView.getAlpha();
                 float scaleX = row.getScaleX();
                 float scaleY = row.getScaleY();
+
                 int h = 0;
-                if (sActualHeightField != null) {
+                if (sGetActualHeightMethod != null) {
+                    try {
+                        Integer rh = (Integer) sGetActualHeightMethod.invoke(row);
+                        if (rh != null && rh > 0) h = rh;
+                    } catch (Throwable ignored) {}
+                }
+                if (h <= 0 && sActualHeightField != null) {
                     try { h = sActualHeightField.getInt(bgView); } catch (Throwable ignored) {}
                 }
                 if (h <= 0) h = bgView.getHeight();
 
+                int w = 0;
+                if (sActualWidthField != null) {
+                    try { w = sActualWidthField.getInt(bgView); } catch (Throwable ignored) {}
+                }
+                if (w <= 0) w = bgView.getWidth();
+
+                int bgTop = 0;
+                if (sBackgroundTopField != null) {
+                    try { bgTop = sBackgroundTopField.getInt(bgView); } catch (Throwable ignored) {}
+                }
                 int ct = 0;
                 if (sClipTopAmountField != null) {
                     try { ct = sClipTopAmountField.getInt(bgView); } catch (Throwable ignored) {}
@@ -3170,24 +3268,38 @@ public class XposedInit implements IXposedHookLoadPackage {
                     try { cb = sClipBottomAmountField.getInt(bgView); } catch (Throwable ignored) {}
                 }
 
+                int curTop = Math.max(bgTop, ct);
+                int curBot = cb > 0 ? (h - cb) : h;
+
                 if (y != mLastY || x != mLastX || alpha != mLastAlpha || scaleX != mLastScaleX || scaleY != mLastScaleY
-                        || h != mLastActualHeight || ct != mLastClipTop || cb != mLastClipBottom) {
+                        || h != mLastActualHeight || w != mLastActualWidth || ct != mLastClipTop || cb != mLastClipBottom) {
                     float vy = !Float.isNaN(mLastY) ? (y - mLastY) : 0f;
                     float vx = !Float.isNaN(mLastX) ? (x - mLastX) : 0f;
+                    float vTop = (mLastDrawTop != Integer.MIN_VALUE) ? (float) (curTop - mLastDrawTop) : 0f;
+                    float vBot = (mLastDrawBottom != Integer.MIN_VALUE) ? (float) (curBot - mLastDrawBottom) : 0f;
+
                     bgView.setTag(TAG_KEY_HUN_VELOCITY_Y, vy);
                     bgView.setTag(TAG_KEY_HUN_VELOCITY_X, vx);
+                    bgView.setTag(TAG_KEY_HUN_VELOCITY_TOP, vTop);
+                    bgView.setTag(TAG_KEY_HUN_VELOCITY_BOT, vBot);
+
                     mLastY = y;
                     mLastX = x;
                     mLastAlpha = alpha;
                     mLastScaleX = scaleX;
                     mLastScaleY = scaleY;
                     mLastActualHeight = h;
+                    mLastActualWidth = w;
                     mLastClipTop = ct;
                     mLastClipBottom = cb;
+                    mLastDrawTop = curTop;
+                    mLastDrawBottom = curBot;
                     bgView.invalidate();
                 } else {
                     bgView.setTag(TAG_KEY_HUN_VELOCITY_Y, 0f);
                     bgView.setTag(TAG_KEY_HUN_VELOCITY_X, 0f);
+                    bgView.setTag(TAG_KEY_HUN_VELOCITY_TOP, 0f);
+                    bgView.setTag(TAG_KEY_HUN_VELOCITY_BOT, 0f);
                 }
             }
             return true;
