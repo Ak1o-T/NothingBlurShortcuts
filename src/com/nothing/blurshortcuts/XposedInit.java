@@ -225,6 +225,7 @@ public class XposedInit implements IXposedHookLoadPackage {
     private static final int TAG_KEY_WAS_HUN = 0x7f0b910d;
     private static final int TAG_KEY_HUN_VELOCITY_TOP = 0x7f0b910e;
     private static final int TAG_KEY_HUN_VELOCITY_BOT = 0x7f0b910f;
+    private static final int TAG_KEY_VOL_PREDRAW = 0x7f0b9110;
 
     // Cached Volume Dialog resource IDs for zero-overhead styling
     private static int sIdExpandContainer = -1;
@@ -2556,6 +2557,47 @@ public class XposedInit implements IXposedHookLoadPackage {
 
                             LayerDrawable ld = new LayerDrawable(new Drawable[] { (Drawable) blurDrawable, gd });
                             capsuleView.setBackground(ld);
+
+                            // Sync blur & tint visibility/alpha with parent container reveal animation
+                            // and suppress pre-layout placeholder flash (e.g. 241px button-sized state before slider expands)
+                            if (!Boolean.TRUE.equals(capsuleView.getTag(TAG_KEY_VOL_PREDRAW))) {
+                                capsuleView.setTag(TAG_KEY_VOL_PREDRAW, Boolean.TRUE);
+                                final Drawable bdRef = (Drawable) blurDrawable;
+                                final GradientDrawable gdRef = gd;
+                                final boolean isMainVolBg = (sIdVolumeBg > 0 && capsuleView.getId() == sIdVolumeBg);
+                                final int minVolHeightPx = Math.round(95.0f * density);
+
+                                final ViewTreeObserver.OnPreDrawListener volSyncListener = new ViewTreeObserver.OnPreDrawListener() {
+                                    @Override
+                                    public boolean onPreDraw() {
+                                        if (!capsuleView.isAttachedToWindow()) return true;
+                                        int w = capsuleView.getWidth();
+                                        int h = capsuleView.getHeight();
+                                        boolean ready = capsuleView.isShown() && w > 0 && h > 0
+                                                && (!isMainVolBg || h >= minVolHeightPx);
+                                        float effAlpha = 0f;
+                                        if (ready) {
+                                            effAlpha = capsuleView.getAlpha();
+                                            ViewParent p = capsuleView.getParent();
+                                            while (p instanceof View && effAlpha > 0.01f) {
+                                                effAlpha *= ((View) p).getAlpha();
+                                                p = p.getParent();
+                                            }
+                                        }
+                                        int a255 = ready ? Math.max(0, Math.min(255, Math.round(255f * effAlpha))) : 0;
+                                        bdRef.setAlpha(a255);
+                                        bdRef.setVisible(a255 > 0, false);
+                                        gdRef.setAlpha(a255);
+                                        return true;
+                                    }
+                                };
+                                ViewTreeObserver vto = capsuleView.getViewTreeObserver();
+                                if (vto != null && vto.isAlive()) {
+                                    vto.addOnPreDrawListener(volSyncListener);
+                                }
+                                volSyncListener.onPreDraw();
+                            }
+
                             capsuleView.invalidate();
                             Log.e(TAG, "setupVolumeCapsuleBlur: Successfully attached BackgroundBlurDrawable to " + capsuleView);
                             return;
