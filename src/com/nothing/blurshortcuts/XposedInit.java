@@ -2272,7 +2272,7 @@ public class XposedInit implements IXposedHookLoadPackage {
                         // have strong rounding, making seams between stacked cards crisp and cohesive.
                         if (onKeyguard && !isHun) {
                             float smallThreshold = 14.0f * densityF;
-                            float tightRadius = 4.0f * densityF;
+                            float tightRadius = 1.0f * densityF;
                             float lockWeight = 1.0f - lsToShade;
                             if (topRadius > tightRadius && topRadius < smallThreshold) {
                                 topRadius = topRadius + (tightRadius - topRadius) * lockWeight;
@@ -2977,7 +2977,7 @@ public class XposedInit implements IXposedHookLoadPackage {
             }
 
             if (setClipRadiusMethod != null) {
-                try { setClipRadiusMethod.invoke(frosted, Math.max(topRadius, bottomRadius)); } catch (Throwable ignored) {}
+                try { setClipRadiusMethod.invoke(frosted, Math.min(topRadius, bottomRadius)); } catch (Throwable ignored) {}
             }
 
             int[] loc = sScreenLocation;
