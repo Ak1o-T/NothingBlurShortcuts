@@ -2266,6 +2266,21 @@ public class XposedInit implements IXposedHookLoadPackage {
                             topRadius = 18.0f * densityF;
                             bottomRadius = topRadius;
                         }
+
+                        // 4. On Lockscreen stacked notifications, tighten the inner seam corners (~4dp)
+                        // so only the top corners of the first card and bottom corners of the last card
+                        // have strong rounding, making seams between stacked cards crisp and cohesive.
+                        if (onKeyguard && !isHun) {
+                            float smallThreshold = 14.0f * densityF;
+                            float tightRadius = 4.0f * densityF;
+                            float lockWeight = 1.0f - lsToShade;
+                            if (topRadius > tightRadius && topRadius < smallThreshold) {
+                                topRadius = topRadius + (tightRadius - topRadius) * lockWeight;
+                            }
+                            if (bottomRadius > tightRadius && bottomRadius < smallThreshold) {
+                                bottomRadius = bottomRadius + (tightRadius - bottomRadius) * lockWeight;
+                            }
+                        }
                     }
 
                     float maxRadius = (drawBottom - drawTop) / 2.0f;
